@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+data/images/
+data/cards.csv
+data/failed_images.txt
+data/pokemon-tcg-data/
+checkpoints/
+index/
+notebooks/.ipynb_checkpoints/
