@@ -585,7 +585,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pokemon-card-evaluator"
+name = "pokemon-card-pricing"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

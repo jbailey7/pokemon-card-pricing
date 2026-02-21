@@ -1,4 +1,4 @@
-# pokemon-card-evaluator
+# pokemon-card-pricing
 
 A machine learning system that identifies a Pokémon card from a photo and looks up its current market value.
 
@@ -18,7 +18,7 @@ Point your camera at a card then get the card identity and current market prices
 ## Project Structure
 
 ```
-pokemon-card-evaluator/
+pokemon-card-pricing/
 ├── data/
 │   ├── download_cards.py     — download card metadata + images from GitHub / CDN
 │   ├── cards.csv             — 20,078 card records (local only)
