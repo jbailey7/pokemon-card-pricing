@@ -176,14 +176,14 @@ def train(args: argparse.Namespace) -> None:
     train_loader = DataLoader(
         train_ds,
         batch_sampler=train_sampler,
-        num_workers=args.num_workers,
+        num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=64,
         shuffle=False,
-        num_workers=args.num_workers,
+        num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
 
@@ -286,7 +286,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin",          type=float, default=0.3, help="Triplet loss margin")
     parser.add_argument("--p",               type=int, default=16,   help="Classes per batch (PK sampler)")
     parser.add_argument("--k",               type=int, default=4,    help="Instances per class per batch (PK sampler)")
-    parser.add_argument("--num-workers",     type=int, default=2,    help="DataLoader num_workers")
     parser.add_argument("--limit",           type=int, default=None, help="Limit to N classes for smoke testing")
     return parser.parse_args()
 
