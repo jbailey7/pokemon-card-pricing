@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from model.constants import EMBEDDING_DIM
 from model.dataset import CardDataset, PKSampler, build_train_transform, build_val_transform
@@ -150,24 +150,23 @@ def train(args: argparse.Namespace) -> None:
         split="val",
     )
 
-    # Optional: limit to N cards for smoke testing
+    # Optional: limit to N classes for smoke testing
     if args.limit:
-        # Take first `limit` unique classes from train
-        class_counts: dict[int, int] = {}
+        keep: set[int] = set()
         limited_indices = []
         for idx in range(len(train_ds)):
             lbl = train_ds.labels[idx]
-            if lbl not in class_counts:
-                class_counts[lbl] = 0
-            if len(class_counts) < args.limit:
+            if lbl not in keep:
+                keep.add(lbl)
+            if len(keep) <= args.limit:
                 limited_indices.append(idx)
-                class_counts[lbl] += 1
-        train_ds = Subset(train_ds, limited_indices)
-        # Rebuild labels list for PKSampler
-        train_labels = [train_ds.dataset.labels[i] for i in limited_indices]
-        log.info(f"Smoke test: limited to {len(class_counts)} classes, {len(limited_indices)} samples")
-    else:
-        train_labels = train_ds.labels
+        # Truncate the dataset in-place to avoid Subset index remapping
+        train_ds.df        = train_ds.df.iloc[limited_indices].reset_index(drop=True)
+        train_ds.labels    = [train_ds.labels[i] for i in limited_indices]
+        train_ds.img_paths = [train_ds.img_paths[i] for i in limited_indices]
+        log.info(f"Smoke test: limited to {len(keep)} classes, {len(limited_indices)} samples")
+
+    train_labels = train_ds.labels
 
     log.info(f"Train: {len(train_ds):,} images | Val: {len(val_ds):,} images")
     log.info(f"Train classes: {len(set(train_labels)):,} | Val classes: {val_ds.num_classes:,}")
