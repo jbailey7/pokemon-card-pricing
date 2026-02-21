@@ -176,14 +176,14 @@ def train(args: argparse.Namespace) -> None:
     train_loader = DataLoader(
         train_ds,
         batch_sampler=train_sampler,
-        num_workers=0,
+        num_workers=2,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=64,
         shuffle=False,
-        num_workers=0,
+        num_workers=2,
         pin_memory=(device.type == "cuda"),
     )
 
@@ -197,8 +197,34 @@ def train(args: argparse.Namespace) -> None:
     scheduler = None
 
     best_val_top1 = 0.0
+    start_epoch = 1
 
-    for epoch in range(1, args.epochs_total + 1):
+    # Resume from last checkpoint if it exists
+    last_ckpt = checkpoint_dir / "last_model.pt"
+    if last_ckpt.exists():
+        ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val_top1 = ckpt.get("best_val_top1", ckpt.get("val_top1", 0.0))
+        # Restore correct phase
+        if start_epoch > args.frozen_epochs + 1:
+            model.unfreeze_backbone()
+            optimizer = torch.optim.Adam(model.trainable_params(), lr=args.lr / 10)
+            remaining_epochs = args.epochs_total - start_epoch + 1
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(remaining_epochs, 1), eta_min=1e-6
+            )
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "scheduler_state_dict" in ckpt and scheduler is not None:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        log.info(f"Resumed from checkpoint: epoch {ckpt['epoch']}, best_val_top1={best_val_top1:.3f}")
+
+    if start_epoch > args.epochs_total:
+        log.info("Training already complete.")
+        return
+
+    for epoch in range(start_epoch, args.epochs_total + 1):
         # Phase transition
         if epoch == args.frozen_epochs + 1:
             log.info(f"Epoch {epoch}: Unfreezing last 2 backbone blocks, lr → {args.lr / 10:.1e}")
@@ -258,17 +284,21 @@ def train(args: argparse.Namespace) -> None:
             )
 
         # Checkpoints
-        torch.save(
-            {"epoch": epoch, "model_state_dict": model.state_dict(), "val_top1": val_top1},
-            checkpoint_dir / "last_model.pt",
-        )
-
         if val_top1 > best_val_top1:
             best_val_top1 = val_top1
-            torch.save(
-                {"epoch": epoch, "model_state_dict": model.state_dict(), "val_top1": val_top1},
-                checkpoint_dir / "best_model.pt",
-            )
+
+        ckpt = {
+            "epoch":                epoch,
+            "model_state_dict":     model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+            "val_top1":             val_top1,
+            "best_val_top1":        best_val_top1,
+        }
+        torch.save(ckpt, checkpoint_dir / "last_model.pt")
+
+        if val_top1 >= best_val_top1:
+            torch.save(ckpt, checkpoint_dir / "best_model.pt")
             log.info(f"  ✓ New best model saved (val_top1={val_top1:.3f})")
 
     log.info(f"Training complete. Best val_top1={best_val_top1:.3f}")
