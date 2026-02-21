@@ -97,10 +97,13 @@ class CardDataset(Dataset):
         img_path = self.img_paths[idx]
         label = self.labels[idx]
 
-        img = Image.open(img_path).convert("RGB")  # RGBA to RGB (composites alpha onto white)
+        img = Image.open(img_path).convert("RGB")
         if self.transform:
             img = self.transform(img)
         return img, label
+
+    def __getitems__(self, indices: list[int]) -> list[tuple[torch.Tensor, int]]:
+        return [self.__getitem__(i) for i in indices]
 
     def get_metadata(self, idx: int) -> dict:
         """Return card metadata dict for a given dataset index."""
