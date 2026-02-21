@@ -138,14 +138,15 @@ class PKSampler(Sampler):
         self.num_batches = num_batches or (len(labels) // batch_size)
 
     def __len__(self) -> int:
-        return self.num_batches * self.p * self.k
+        return self.num_batches
 
     def __iter__(self):
         for _ in range(self.num_batches):
             # Sample P classes at random
             chosen_classes = random.sample(self.classes, min(self.p, len(self.classes)))
+            batch = []
             for cls in chosen_classes:
                 indices = self.label_to_indices[cls]
                 # Sample K indices with replacement (handles classes with < K images)
-                chosen = random.choices(indices, k=self.k)
-                yield from chosen
+                batch.extend(random.choices(indices, k=self.k))
+            yield batch
