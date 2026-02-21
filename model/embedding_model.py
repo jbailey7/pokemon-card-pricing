@@ -38,18 +38,10 @@ class EmbeddingModel(nn.Module):
 
     # Progressive unfreezing helpers
     def freeze_backbone(self) -> None:
-        """Freeze all backbone parameters (train projection head only)."""
         for param in self.backbone.parameters():
             param.requires_grad = False
 
     def unfreeze_backbone(self) -> None:
-        """Unfreeze the last 2 feature blocks of EfficientNet-B0.
-
-        EfficientNet-B0 backbone (self.backbone) has 9 children:
-          0: stem Conv2dNormActivation
-          1–8: MBConv blocks (indices 1..8)
-        We unfreeze blocks 7 and 8 — the deepest spatial features.
-        """
         # First ensure everything is frozen
         self.freeze_backbone()
 
@@ -59,5 +51,4 @@ class EmbeddingModel(nn.Module):
                 param.requires_grad = True
 
     def trainable_params(self) -> list[nn.Parameter]:
-        """Return list of parameters with requires_grad=True."""
         return [p for p in self.parameters() if p.requires_grad]
