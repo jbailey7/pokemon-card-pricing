@@ -159,7 +159,7 @@ def train(args: argparse.Namespace) -> None:
             lbl = train_ds.labels[idx]
             if lbl not in class_counts:
                 class_counts[lbl] = 0
-            if len(class_counts) <= args.limit:
+            if len(class_counts) < args.limit:
                 limited_indices.append(idx)
                 class_counts[lbl] += 1
         train_ds = Subset(train_ds, limited_indices)
