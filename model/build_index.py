@@ -101,8 +101,8 @@ def build_index(args: argparse.Namespace) -> None:
     with open(meta_path, "wb") as f:
         pickle.dump(metadata, f)
 
-    log.info(f"Embeddings → {emb_path} ({emb_path.stat().st_size / 1e6:.1f} MB, {len(all_embeddings):,} vectors)")
-    log.info(f"Metadata   → {meta_path}")
+    log.info(f"Embeddings -> {emb_path} ({emb_path.stat().st_size / 1e6:.1f} MB, {len(all_embeddings):,} vectors)")
+    log.info(f"Metadata   -> {meta_path}")
 
 
 def parse_args() -> argparse.Namespace:

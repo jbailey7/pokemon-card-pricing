@@ -10,3 +10,4 @@ checkpoints/
 index/
 notebooks/.ipynb_checkpoints/
 pricing/price_cache.json
+eval/photos/

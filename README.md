@@ -33,6 +33,18 @@ pokemon-card-pricing/
 ├── pricing/
 │   ├── price_lookup.py       — JustTCG API client + TCGPlayer URL builder
 │   └── price_cache.json      — 12-hour price cache (local only)
+├── eval/
+│   ├── find_card.py          — look up a card_id by name / set / number
+│   ├── evaluate.py           — run inference on real photos, report accuracy
+│   ├── ground_truth.csv      — filename -> card_id labels
+│   └── photos/               — your card photos (local only)
+├── results/
+│   ├── training_log.csv      — per-epoch metrics from the training run
+│   ├── training_curves.png   — loss and accuracy plots
+│   └── plot_training.py      — script that regenerates the PNG
+├── tests/
+│   ├── test_pricing.py       — unit tests for pricing helpers
+│   └── test_app.py           — unit tests for app helpers
 ├── main.py                   — Streamlit app
 └── pyproject.toml
 ```
@@ -87,6 +99,72 @@ uv run python -m model.build_index \
 ```
 
 
+## Results
+
+### Model performance
+
+Evaluated on a 2,002-card hold-out set (10% of unique card IDs, stratified by ID, not seen during training).
+
+| Metric | Score |
+|--------|-------|
+| **Top-1 retrieval accuracy** | **74.8%** |
+| **Top-3 retrieval accuracy** | **88.7%** |
+
+The app presents the top-3 candidates to the user rather than auto-selecting the top-1 result. This means the effective user-facing accuracy is the Top-3 figure: the correct card appears in the shortlist **88.7%** of the time on clean images.
+
+### Training run
+
+| | |
+|---|---|
+| Device | NVIDIA GPU (CUDA) |
+| Epochs | 30 |
+| Total training time | ~2 hours |
+| Backbone | EfficientNet-B0 (ImageNet pretrained) |
+| Train / val split | 18,022 / 2,002 images |
+| Best checkpoint | Epoch 24 |
+
+The sharp jump at epoch 6 marks the backbone unfreeze (last 2 blocks opened up at 10× lower LR). The active triplet % falling from 100% to ~36% over training shows the model is learning to correctly separate most examples — if it stayed at 100% the margin would be too tight; if it collapsed to 0% too quickly, training would stall.
+
+![Training curves](results/training_curves.png)
+
+Raw epoch data is in [`results/training_log.csv`](results/training_log.csv).
+
+
+### Real-photo evaluation
+
+The validation numbers above are measured on clean official card art. To quantify the domain gap on actual phone photos, run the evaluation script against your own cards:
+
+```bash
+# 1. Add card photos to eval/photos/
+
+# 2. Look up the card_id for each photo using find_card.py:
+uv run python eval/find_card.py "Charizard" --set "Base Set"
+#  id       name       set_name   number  rarity
+#  base1-4  Charizard  Base Set   4       Rare Holo
+#
+#  card_id: base1-4
+
+# 3. Fill in eval/ground_truth.csv:
+#      filename,card_id
+#      charizard_front.jpg,base1-4
+#      pikachu_sleeve.jpg,base1-58
+
+# 4. Run:
+uv run python eval/evaluate.py
+```
+
+Results are saved to `eval/real_photo_results.csv`. The photos themselves are gitignored (too large), but the ground truth labels and results file are committed so the evaluation is reproducible.
+
+Tested on 20 photos of cards taken with a phone camera (varied lighting, slight angles, card sleeves). The main failure modes were reprint confusion (correct Pokémon, wrong set) and one wrong-card miss on a 25th Anniversary promo — both edge cases for the top-3 UI flow.
+
+| Metric | Clean images (val set) | Real photos (n=20) |
+|--------|----------------------|--------------------|
+| Top-1  | 74.8%               | **90.0%**          |
+| Top-3  | 88.7%               | **95.0%**          |
+
+The real-photo numbers are higher than the val set figures, likely due to the small sample size and the fact that these cards were photographed with reasonable framing. The val set covers the full distribution of 2,002 card identities including many visually similar cards, making it the more conservative benchmark.
+
+
 ## How It Works
 
 ### Data
@@ -122,7 +200,7 @@ Images are stored as `data/images/{set_id}/{number}_hires.png`.
 
 **No `RandomHorizontalFlip`** — the set symbol and card number position are semantically meaningful.
 
-Val/inference uses `Resize(224)` → `CenterCrop(224)` → `Normalize` only.
+Val/inference uses `Resize(224)` -> `CenterCrop(224)` -> `Normalize` only.
 
 
 ### Model
@@ -131,10 +209,10 @@ Val/inference uses `Resize(224)` → `CenterCrop(224)` → `Normalize` only.
 
 ```
 Input (224×224 RGB)
-  → EfficientNet-B0 backbone (pretrained ImageNet, classifier removed)
-  → AdaptiveAvgPool2d → 1280-d feature vector
-  → Linear(1280→512) → BatchNorm1d → ReLU → Linear(512→512)
-  → L2 normalise → 512-d embedding
+  -> EfficientNet-B0 backbone (pretrained ImageNet, classifier removed)
+  -> AdaptiveAvgPool2d -> 1280-d feature vector
+  -> Linear(1280->512) -> BatchNorm1d -> ReLU -> Linear(512->512)
+  -> L2 normalise -> 512-d embedding
 ```
 
 **Training objective:** Online batch-hard triplet loss
@@ -145,6 +223,16 @@ Input (224×224 RGB)
 **Progressive unfreezing:**
 - Epochs 1–5: backbone frozen, train projection head only (`lr=1e-3`)
 - Epochs 6–30: last 2 EfficientNet blocks unfrozen (`lr=1e-4`, CosineAnnealingLR)
+
+**Key hyperparameter choices:**
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Triplet margin | 0.3 | Embeddings are L2-normalised so distances lie in [0, 2]. A margin of 0.3 is strict enough to enforce meaningful separation without making most triplets inactive from the start. |
+| P (classes per batch) | 16 | Enough class diversity per batch for hard mining to find meaningful negatives, without the batch growing so large that GPU memory becomes a constraint. |
+| K (samples per class) | 4 | Provides enough positive pairs per class to reliably identify the hardest one, while keeping the batch size manageable (P×K = 64). |
+| Embedding dim | 512 | A common middle ground for retrieval at this scale (~20k items). 128-d loses too much discriminative capacity; 1024-d adds memory and compute overhead with diminishing returns. The full index (20k × 512 float32) fits comfortably in RAM at ~41 MB. |
+| Backbone unfreeze LR | 1e-4 (10× lower) | Prevents the pretrained backbone weights from being overwritten by the high projection-head LR. A 10× reduction is standard practice for fine-tuning a frozen-then-unfrozen backbone. |
 
 **Validation metric:** Top-1 and Top-3 retrieval accuracy — embed all val images, find nearest neighbours, check if the correct card is returned.
 
@@ -169,35 +257,47 @@ for r in results:
     print(f"#{r['rank']} {r['name']} ({r['set_name']} #{r['number']}) — score {r['score']:.3f}")
 ```
 
-Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before prices are fetched.
+Returns top-3 candidates, each with a `score` field. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before prices are fetched.
+
+The score is computed as `1 / (1 + L2_distance)`, which maps the L2 distance of L2-normalised embeddings (range [0, 2]) to a display-friendly value in `(0, 1]`. It is a monotonic indicator of retrieval confidence — a higher score means the query embedding is closer to the candidate — but it is **not a calibrated probability** and should not be interpreted as one.
 
 
 ### Price Lookup
 
-After the user confirms which card they have, the app fetches Near Mint pricing from the **JustTCG API** (free tier: 1,000 req/month) and displays:
+After the user confirms which card they have, the app fetches pricing from the **JustTCG API** (free tier: 1,000 req/month) and displays:
 
-- **Market price** — current Near Mint market value with 90-day % change
-- **90-day range** — min and max over the last 90 days
+- **Market price** — current market value with 90-day % change
+- **90-day low / high** — price range over the last 90 days
+- **Edition / printing selector** — e.g. Unlimited vs Shadowless vs 1st Edition (shown when multiple variants exist)
+- **Condition selector** — Near Mint, Lightly Played, Moderately Played, Heavily Played, Damaged
 - **TCGPlayer link** — direct search link for the card
 
 ```python
-from pricing.price_lookup import get_prices, tcgplayer_url
+from pricing.price_lookup import get_variants, tcgplayer_url
 
-prices = get_prices(card)  # card is a dict from CardIdentifier.predict()
-# {
-#   "market":     12.50,
-#   "low_90d":    9.00,
-#   "high_90d":   18.00,
-#   "change_90d": -8.3,   # % change over 90 days
-#   "condition":  "Near Mint",
-#   "printing":   "Foil",
-# }
+variants = get_variants(card)  # card is a dict from CardIdentifier.predict()
+# [
+#   {
+#     "label":      "Unlimited Holofoil",
+#     "market":     12.50,
+#     "low_90d":    9.00,
+#     "high_90d":   18.00,
+#     "change_90d": -8.3,
+#     "condition":  "Near Mint",
+#     "printing":   "Unlimited Holofoil",
+#     "updated_at": 1740000000,
+#   },
+#   { "label": "1st Edition Holofoil", ... },
+#   ...
+# ]
 
 url = tcgplayer_url(card)
 # "https://www.tcgplayer.com/search/pokemon/product?q=Charizard+Base+Set&productLineName=pokemon"
 ```
 
-**Variant selection:** holos get the `Foil` price track; everything else uses `Normal`, based on the card's rarity.
+**Variant selection:** foil/non-foil type is inferred from the card's rarity. Within a type, all editions and conditions returned by the API are shown — Unlimited is sorted first.
+
+**Anomaly detection:** if prices are out of the expected NM ≥ LP ≥ MP ≥ HP ≥ Damaged order (which can happen with sparse sales data), a warning is shown in the UI.
 
 **Caching:** results are stored in `pricing/price_cache.json` keyed by card ID with a 12-hour TTL, so the free-tier request budget isn't a concern in normal use.
 

@@ -208,7 +208,7 @@ def train(args: argparse.Namespace) -> None:
 
     for epoch in range(start_epoch, args.epochs_total + 1):
         if epoch == args.frozen_epochs + 1:
-            log.info(f"Epoch {epoch}: Unfreezing last 2 backbone blocks, lr → {args.lr / 10:.1e}")
+            log.info(f"Epoch {epoch}: Unfreezing last 2 backbone blocks, lr -> {args.lr / 10:.1e}")
             model.unfreeze_backbone()
             optimizer = torch.optim.Adam(model.trainable_params(), lr=args.lr / 10)
             remaining_epochs = args.epochs_total - epoch + 1
