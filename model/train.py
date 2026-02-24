@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def pairwise_l2_distance(embeddings: torch.Tensor) -> torch.Tensor:
     dot = dot.clamp(-1, 1)
     sq_dist = 2.0 - 2.0 * dot
     sq_dist = sq_dist.clamp(min=0)  # avoid tiny negatives from float precision
-    return sq_dist.sqrt()
+    return (sq_dist + 1e-8).sqrt()  # epsilon prevents inf gradient at dist=0
 
 
 def batch_hard_triplet_loss(
@@ -80,44 +81,53 @@ def batch_hard_triplet_loss(
     return loss, active_fraction
 
 
-# Validation — retrieval top-k accuracy
+# Validation — augmented query vs clean gallery retrieval accuracy
+# Each val card is embedded twice: once with training augmentation (query, simulating
+# a real photo) and once with the standard val transform (gallery). top-k accuracy
+# measures how often the correct clean card is the nearest neighbour of its noisy query.
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
-    val_loader: DataLoader,
+    val_ds,
     device: torch.device,
     k: int = 3,
 ) -> tuple[float, float]:
     model.eval()
-    all_embeddings = []
-    all_labels = []
+    pin = device.type == "cuda"
 
-    for imgs, labels in val_loader:
-        imgs = imgs.to(device)
-        emb = model(imgs)
-        all_embeddings.append(emb.cpu())
-        all_labels.append(labels)
+    def _embed(transform) -> tuple[torch.Tensor, torch.Tensor]:
+        orig = val_ds.transform
+        val_ds.transform = transform
+        loader = DataLoader(val_ds, batch_size=64, shuffle=False,
+                            num_workers=0, pin_memory=pin)
+        embs, lbls = [], []
+        for imgs, labels in loader:
+            embs.append(model(imgs.to(device)).cpu())
+            lbls.append(labels)
+        val_ds.transform = orig
+        return torch.cat(embs), torch.cat(lbls)
 
-    all_embeddings = torch.cat(all_embeddings, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)       
+    # Gallery: clean centre-cropped images (one per card)
+    gallery_emb, gallery_labels = _embed(build_val_transform())
+    # Query: same cards with random augmentation (simulates a real photo)
+    query_emb, query_labels = _embed(build_train_transform())
 
-    n = all_embeddings.size(0)
+    n = query_emb.size(0)
 
-    # Pairwise distances on CPU (avoid OOM on large val sets)
-    dist = pairwise_l2_distance(all_embeddings)  # (N, N)
-
-    # Exclude self (set diagonal to inf)
-    dist.fill_diagonal_(float("inf"))
+    # Cross distances: queries (N) vs gallery (N) — no self-exclusion needed
+    # since query and gallery are different augmentations of the same images
+    dot = (query_emb @ gallery_emb.t()).clamp(-1, 1)
+    dist = (2.0 - 2.0 * dot).clamp(min=0).add(1e-8).sqrt()  # (N, N)
 
     top1_correct = 0
     topk_correct = 0
 
     for i in range(n):
-        query_label = all_labels[i].item()
+        query_label = query_labels[i].item()
         sorted_idx = dist[i].argsort()
 
-        top1_label = all_labels[sorted_idx[0]].item()
-        topk_labels = [all_labels[sorted_idx[j]].item() for j in range(min(k, n - 1))]
+        top1_label = gallery_labels[sorted_idx[0]].item()
+        topk_labels = [gallery_labels[sorted_idx[j]].item() for j in range(min(k, n))]
 
         if top1_label == query_label:
             top1_correct += 1
@@ -132,6 +142,8 @@ def evaluate(
 # Training loop
 def train(args: argparse.Namespace) -> None:
     device = get_device()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -176,13 +188,6 @@ def train(args: argparse.Namespace) -> None:
     train_loader = DataLoader(
         train_ds,
         batch_sampler=train_sampler,
-        num_workers=2,
-        pin_memory=(device.type == "cuda"),
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=64,
-        shuffle=False,
         num_workers=2,
         pin_memory=(device.type == "cuda"),
     )
@@ -265,7 +270,7 @@ def train(args: argparse.Namespace) -> None:
         elapsed = time.time() - t0
 
         # Validate
-        val_top1, val_top3 = evaluate(model, val_loader, device, k=3)
+        val_top1, val_top3 = evaluate(model, val_ds, device, k=3)
 
         log.info(
             f"Epoch {epoch:3d}/{args.epochs_total} | "
@@ -296,9 +301,13 @@ def train(args: argparse.Namespace) -> None:
             "best_val_top1":        best_val_top1,
         }
         torch.save(ckpt, checkpoint_dir / "last_model.pt")
+        with open(checkpoint_dir / "last_model.pt", "r+b") as f:
+            os.fsync(f.fileno())
 
         if val_top1 >= best_val_top1:
             torch.save(ckpt, checkpoint_dir / "best_model.pt")
+            with open(checkpoint_dir / "best_model.pt", "r+b") as f:
+                os.fsync(f.fileno())
             log.info(f"  ✓ New best model saved (val_top1={val_top1:.3f})")
 
     log.info(f"Training complete. Best val_top1={best_val_top1:.3f}")
