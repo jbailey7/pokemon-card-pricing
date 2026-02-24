@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Pokémon card identifier — recognise a card from a photo and look up its market value"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.1",
     "pandas>=2.2.0",
     "tqdm>=4.67.3",
     "torch>=2.2.0,<2.3.0",

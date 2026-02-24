@@ -1,6 +1,6 @@
 # pokemon-card-pricing
 
-A machine learning system that identifies a Pokémon card from a photo and links to its current TCGPlayer listing.
+A machine learning system that identifies a Pokémon card from a photo and looks up its current market price.
 
 
 ## Overview
@@ -9,10 +9,10 @@ A machine learning system that identifies a Pokémon card from a photo and links
 Takes a photo of a Pokémon card and identifies exactly which card it is: name, set, card number, and rarity.
 
 **Price Lookup**
-Constructs a direct TCGPlayer search URL for the identified card so you can check current market prices instantly.
+Fetches Near Mint market price and 90-day low/high from the JustTCG API (free tier), then links to the card's TCGPlayer listing.
 
 **Output:**
-Point your camera at a card and get the card identity and a link to its TCGPlayer listing in seconds.
+Point your camera at a card and get the identity, current market price, 90-day range, and a direct TCGPlayer link.
 
 
 ## Project Structure
@@ -31,7 +31,8 @@ pokemon-card-pricing/
 │   ├── build_index.py        — embed all cards -> numpy embeddings array
 │   └── inference.py          — CardIdentifier class
 ├── pricing/
-│   └── price_lookup.py       — TCGPlayer URL builder
+│   ├── price_lookup.py       — JustTCG API client + TCGPlayer URL builder
+│   └── price_cache.json      — 12-hour price cache (local only)
 ├── main.py                   — Streamlit app
 └── pyproject.toml
 ```
@@ -43,6 +44,10 @@ pokemon-card-pricing/
 # Install dependencies (requires Python 3.12, uv)
 uv sync
 
+# Add your JustTCG API key — free at https://justtcg.com/dashboard
+cp .env.example .env
+# edit .env and set JUSTTCG_API_KEY=...
+
 # Download card metadata and images (~14 GB, takes ~45 min)
 uv run python data/download_cards.py
 
@@ -50,7 +55,7 @@ uv run python data/download_cards.py
 uv run python data/download_cards.py --sets-only
 ```
 
-No API keys required.
+The app works without an API key — pricing will just be unavailable and only the TCGPlayer link is shown.
 
 
 ## Training
@@ -164,26 +169,67 @@ for r in results:
     print(f"#{r['rank']} {r['name']} ({r['set_name']} #{r['number']}) — score {r['score']:.3f}")
 ```
 
-Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before the TCGPlayer link is shown.
+Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before prices are fetched.
 
 
 ### Price Lookup
 
-After the user confirms which card they have, the app constructs a TCGPlayer search URL from the card's name and set and opens it in a new tab. No API key or network request is needed — the link is built entirely from the card metadata already in the index.
+After the user confirms which card they have, the app fetches Near Mint pricing from the **JustTCG API** (free tier: 1,000 req/month) and displays:
+
+- **Market price** — current Near Mint market value with 90-day % change
+- **90-day range** — min and max over the last 90 days
+- **TCGPlayer link** — direct search link for the card
 
 ```python
-from pricing.price_lookup import tcgplayer_url
+from pricing.price_lookup import get_prices, tcgplayer_url
 
-url = tcgplayer_url(card)  # card is a dict from CardIdentifier.predict()
+prices = get_prices(card)  # card is a dict from CardIdentifier.predict()
+# {
+#   "market":     12.50,
+#   "low_90d":    9.00,
+#   "high_90d":   18.00,
+#   "change_90d": -8.3,   # % change over 90 days
+#   "condition":  "Near Mint",
+#   "printing":   "Foil",
+# }
+
+url = tcgplayer_url(card)
 # "https://www.tcgplayer.com/search/pokemon/product?q=Charizard+Base+Set&productLineName=pokemon"
 ```
+
+**Variant selection:** holos get the `Foil` price track; everything else uses `Normal`, based on the card's rarity.
+
+**Caching:** results are stored in `pricing/price_cache.json` keyed by card ID with a 12-hour TTL, so the free-tier request budget isn't a concern in normal use.
+
+
+## Price Data Quality
+
+Prices come from the **JustTCG free tier**, which aggregates recent completed sales from TCGPlayer. The data is generally reliable for popular cards with high sales volume, but can look unusual in a few situations:
+
+**Sparse sales data.** Market price is a weighted average of recent sales. If a particular condition (e.g. Near Mint) has had very few sales in the last 90 days, a single low-ball transaction can drag the average down significantly. This can produce counterintuitive results like a Lightly Played copy appearing more expensive than Near Mint. The app flags this with a warning when it detects prices out of the expected NM ≥ LP ≥ MP ≥ HP ≥ Damaged order.
+
+**Staleness.** Prices are cached locally for 12 hours and JustTCG updates their data on their own schedule. For fast-moving cards (new set releases, tournament results), the displayed price may lag the live TCGPlayer market by up to a day. When in doubt, click the TCGPlayer link to see current listings.
+
+**Free tier limitations.** The JustTCG free tier provides 1,000 requests per month. The 12-hour local cache means routine use stays well within this, but the data is sourced from TCGPlayer's market rather than being live or guaranteed complete.
+
+### Upgrading to a paid data source
+
+If you need consistently reliable prices across all conditions and rarities, the options are:
+
+| Option | What you get | Cost |
+|--------|-------------|------|
+| **JustTCG paid tier** | Same API, higher rate limits, priority data freshness | From ~$10/mo |
+| **TCGPlayer Pro API** | Direct access to TCGPlayer's own pricing data | Invite-only / requires approval |
+| **TCGCSV** | Bulk CSV/JSON snapshots of current listings, no API key required | Free, but no historical data |
+
+For this project, swapping in a different source only requires updating `pricing/price_lookup.py` — `get_variants()` is the single function that talks to the external API, and `main.py` only depends on the dict structure it returns.
 
 
 ## Known Limitations
 
 | Limitation | Mitigation |
 |------------|-----------|
-| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms before the link is shown |
+| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms before prices are fetched |
 | **Domain gap** — trained on clean official art, tested on real photos | Aggressive augmentation during training |
 | **57 promo cards** have no CDN image and are excluded from training | Listed in `data/failed_images.txt` |
 | **Very low resolution or heavy glare** photos | Model returns low confidence scores |
