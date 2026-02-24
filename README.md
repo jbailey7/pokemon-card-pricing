@@ -1,6 +1,6 @@
 # pokemon-card-pricing
 
-A machine learning system that identifies a Pokémon card from a photo and looks up its current market value.
+A machine learning system that identifies a Pokémon card from a photo and links to its current TCGPlayer listing.
 
 
 ## Overview
@@ -9,10 +9,10 @@ A machine learning system that identifies a Pokémon card from a photo and looks
 Takes a photo of a Pokémon card and identifies exactly which card it is: name, set, card number, and rarity.
 
 **Price Lookup**
-Uses the identified card to query the Pokémon TCG API for current TCGPlayer market prices: low, mid, high, and market value.
+Constructs a direct TCGPlayer search URL for the identified card so you can check current market prices instantly.
 
 **Output:**
-Point your camera at a card and get the card identity and current market prices in seconds.
+Point your camera at a card and get the card identity and a link to its TCGPlayer listing in seconds.
 
 
 ## Project Structure
@@ -28,11 +28,11 @@ pokemon-card-pricing/
 │   ├── embedding_model.py    — EfficientNet-B0 + projection head
 │   ├── dataset.py            — CardDataset, PKSampler, augmentation pipeline
 │   ├── train.py              — training loop with online hard triplet mining
-│   ├── build_index.py        — embed all cards -> FAISS nearest-neighbour index
+│   ├── build_index.py        — embed all cards -> numpy embeddings array
 │   └── inference.py          — CardIdentifier class
 ├── pricing/
-│   └── price_lookup.py       — PokémonTCG API price lookup with local cache
-├── main.py                   — entry point (Streamlit app, planned)
+│   └── price_lookup.py       — TCGPlayer URL builder
+├── main.py                   — Streamlit app
 └── pyproject.toml
 ```
 
@@ -43,16 +43,14 @@ pokemon-card-pricing/
 # Install dependencies (requires Python 3.12, uv)
 uv sync
 
-# Copy the example env file and add your Pokémon TCG API key
-# Get a free key at https://dev.pokemontcg.io
-cp .env.example .env
-
 # Download card metadata and images (~14 GB, takes ~45 min)
 uv run python data/download_cards.py
 
 # Metadata only (no images, ~5 MB, instant)
 uv run python data/download_cards.py --sets-only
 ```
+
+No API keys required.
 
 
 ## Training
@@ -75,7 +73,7 @@ uv run python -m model.train \
     --limit 200
 ```
 
-**Build the FAISS index** after training:
+**Build the embeddings index** after training:
 ```bash
 uv run python -m model.build_index \
     --checkpoint checkpoints/best_model.pt \
@@ -124,7 +122,7 @@ Val/inference uses `Resize(224)` → `CenterCrop(224)` → `Normalize` only.
 
 ### Model
 
-**Architecture: EfficientNet-B0 + Projection Head + FAISS**
+**Architecture: EfficientNet-B0 + Projection Head + numpy nearest-neighbour search**
 
 ```
 Input (224×224 RGB)
@@ -145,7 +143,7 @@ Input (224×224 RGB)
 
 **Validation metric:** Top-1 and Top-3 retrieval accuracy — embed all val images, find nearest neighbours, check if the correct card is returned.
 
-**FAISS index:** `IndexFlatL2(512)` — exact nearest-neighbour search over 20k embeddings (~39 MB).
+**Nearest-neighbour search:** embeddings are saved as `index/card_embeddings.npy` (20k × 512 float32). At inference time a single matrix multiply against the query vector ranks all cards by cosine similarity in well under a second on CPU.
 
 
 ### Inference
@@ -166,41 +164,27 @@ for r in results:
     print(f"#{r['rank']} {r['name']} ({r['set_name']} #{r['number']}) — score {r['score']:.3f}")
 ```
 
-Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before prices are fetched.
+Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before the TCGPlayer link is shown.
 
 
 ### Price Lookup
 
-Prices are fetched from the **Pokémon TCG API** (`api.pokemontcg.io`) using the card's ID, which maps directly to the API's card identifier (e.g. `base1-4`). No search step is needed.
+After the user confirms which card they have, the app constructs a TCGPlayer search URL from the card's name and set and opens it in a new tab. No API key or network request is needed — the link is built entirely from the card metadata already in the index.
 
 ```python
-from pricing.price_lookup import PriceLookup
+from pricing.price_lookup import tcgplayer_url
 
-lookup = PriceLookup()
-prices = lookup.lookup(card)  # card is a dict from CardIdentifier.predict()
-
-# {
-#   "variant":       "holofoil",
-#   "low":           8.50,
-#   "mid":           12.00,
-#   "high":          25.00,
-#   "market":        11.25,
-#   "tcgplayer_url": "https://www.tcgplayer.com/...",
-#   "updated_at":    "2026/02/20",
-# }
+url = tcgplayer_url(card)  # card is a dict from CardIdentifier.predict()
+# "https://www.tcgplayer.com/search/pokemon/product?q=Charizard+Base+Set&productLineName=pokemon"
 ```
-
-**Variant selection:** The API returns separate price tracks for different card variants (`normal`, `holofoil`, `reverseHolofoil`, `1stEditionHolofoil`, `1stEditionNormal`). The correct variant is selected automatically based on the card's rarity — holos get the `holofoil` track, everything else gets `normal`, with fallbacks if a variant isn't available.
-
-**Caching:** Prices are cached locally in `pricing/price_cache.json` keyed by card ID. Repeated lookups for the same card skip the API entirely.
 
 
 ## Known Limitations
 
 | Limitation | Mitigation |
 |------------|-----------|
-| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms before prices are fetched |
+| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms before the link is shown |
 | **Domain gap** — trained on clean official art, tested on real photos | Aggressive augmentation during training |
 | **57 promo cards** have no CDN image and are excluded from training | Listed in `data/failed_images.txt` |
 | **Very low resolution or heavy glare** photos | Model returns low confidence scores |
-| **TCGPlayer prices only** — no graded (PSA/CGC) pricing | Out of scope; TCGPlayer market price covers the primary use case |
+| **No graded (PSA/CGC) pricing** | Out of scope; TCGPlayer covers the primary use case |

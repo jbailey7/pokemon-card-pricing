@@ -3,7 +3,7 @@ import logging
 import pickle
 from pathlib import Path
 
-import faiss
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -54,7 +54,6 @@ def build_index(args: argparse.Namespace) -> None:
     log.info(f"Building index over {len(df):,} cards")
 
     transform = build_val_transform()
-    index = faiss.IndexFlatL2(EMBEDDING_DIM)
     metadata: list[dict] = []
     embeddings_list = []
     batch_size = 64
@@ -91,25 +90,23 @@ def build_index(args: argparse.Namespace) -> None:
                 })
 
     all_embeddings = torch.cat(embeddings_list, dim=0).numpy()
-    index.add(all_embeddings)
-    log.info(f"Index contains {index.ntotal:,} vectors")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    faiss_path = output_dir / "card_index.faiss"
-    meta_path  = output_dir / "card_metadata.pkl"
+    emb_path  = output_dir / "card_embeddings.npy"
+    meta_path = output_dir / "card_metadata.pkl"
 
-    faiss.write_index(index, str(faiss_path))
+    np.save(emb_path, all_embeddings)
     with open(meta_path, "wb") as f:
         pickle.dump(metadata, f)
 
-    log.info(f"FAISS index → {faiss_path} ({faiss_path.stat().st_size / 1e6:.1f} MB)")
-    log.info(f"Metadata    → {meta_path}")
+    log.info(f"Embeddings → {emb_path} ({emb_path.stat().st_size / 1e6:.1f} MB, {len(all_embeddings):,} vectors)")
+    log.info(f"Metadata   → {meta_path}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build FAISS card embedding index")
+    parser = argparse.ArgumentParser(description="Build card embedding index")
     parser.add_argument("--checkpoint",  required=True,     help="Path to trained model checkpoint (.pt)")
     parser.add_argument("--data-dir",    default="data/",   help="Root data directory (contains cards.csv and images/)")
     parser.add_argument("--output-dir",  default="index/",  help="Directory to write index files")
