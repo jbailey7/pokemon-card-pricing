@@ -5,14 +5,14 @@ A machine learning system that identifies a Pokémon card from a photo and looks
 
 ## Overview
 
-**Model — Card Identification (Computer Vision)**
+**Card Identification (Computer Vision)**
 Takes a photo of a Pokémon card and identifies exactly which card it is: name, set, card number, and rarity.
 
 **Price Lookup**
-Uses the identified card to query PriceCharting for current market prices: ungraded, PSA 9, and PSA 10.
+Uses the identified card to query the Pokémon TCG API for current TCGPlayer market prices: low, mid, high, and market value.
 
 **Output:**
-Point your camera at a card then get the card identity and current market prices in seconds.
+Point your camera at a card and get the card identity and current market prices in seconds.
 
 
 ## Project Structure
@@ -24,15 +24,15 @@ pokemon-card-pricing/
 │   ├── cards.csv             — 20,078 card records (local only)
 │   └── images/               — 20,021 hi-res card images (local only)
 ├── model/
-│   ├── constants.py          — shared constants 
+│   ├── constants.py          — shared constants
 │   ├── embedding_model.py    — EfficientNet-B0 + projection head
 │   ├── dataset.py            — CardDataset, PKSampler, augmentation pipeline
 │   ├── train.py              — training loop with online hard triplet mining
 │   ├── build_index.py        — embed all cards -> FAISS nearest-neighbour index
-│   └── inference.py          — CardIdentifier class for production use
-├── notebooks/
-│   └── train.ipynb           — self-contained Google Colab training notebook
-├── main.py                   — entry point (Streamlit app, future phase)
+│   └── inference.py          — CardIdentifier class
+├── pricing/
+│   └── price_lookup.py       — PokémonTCG API price lookup with local cache
+├── main.py                   — entry point (Streamlit app, planned)
 └── pyproject.toml
 ```
 
@@ -43,6 +43,10 @@ pokemon-card-pricing/
 # Install dependencies (requires Python 3.12, uv)
 uv sync
 
+# Copy the example env file and add your Pokémon TCG API key
+# Get a free key at https://dev.pokemontcg.io
+cp .env.example .env
+
 # Download card metadata and images (~14 GB, takes ~45 min)
 uv run python data/download_cards.py
 
@@ -51,17 +55,18 @@ uv run python data/download_cards.py --sets-only
 ```
 
 
-## Training (Google Colab)
+## Training
 
-Open `notebooks/train.ipynb` in Google Colab with a **T4 GPU runtime**. The notebook:
-1. Installs pinned dependencies
-2. Clones this repo
-3. Downloads card data from the CDN (or uses a Drive cache from a previous session)
-4. Trains the embedding model (30 epochs, ~2–3 hours on T4)
-5. Builds the FAISS index
-6. Validates inference on a test card
+Training was done locally on the full 20k card dataset.
 
-**Local smoke test** (CPU, 200 cards, 2 epochs):
+```bash
+uv run python -m model.train \
+    --data-dir data/ \
+    --checkpoint-dir checkpoints/ \
+    --epochs-total 30
+```
+
+**Smoke test** (CPU, 200 cards, 2 epochs):
 ```bash
 uv run python -m model.train \
     --data-dir data/ \
@@ -81,7 +86,7 @@ uv run python -m model.build_index \
 
 ## How It Works
 
-### Phase 1 — Data
+### Data
 
 **Source:** [`PokemonTCG/pokemon-tcg-data`](https://github.com/PokemonTCG/pokemon-tcg-data) — a static GitHub dump of all card metadata. Images are downloaded from the CDN at `images.pokemontcg.io`.
 
@@ -97,7 +102,7 @@ Using the static repo rather than the live API avoids timeout and reliability is
 Images are stored as `data/images/{set_id}/{number}_hires.png`.
 
 
-### Phase 2 — Data Processing
+### Data Processing
 
 **Augmentation pipeline** (training only, applied on the fly):
 
@@ -117,7 +122,7 @@ Images are stored as `data/images/{set_id}/{number}_hires.png`.
 Val/inference uses `Resize(224)` → `CenterCrop(224)` → `Normalize` only.
 
 
-### Phase 3 — Modelling 
+### Model
 
 **Architecture: EfficientNet-B0 + Projection Head + FAISS**
 
@@ -138,12 +143,12 @@ Input (224×224 RGB)
 - Epochs 1–5: backbone frozen, train projection head only (`lr=1e-3`)
 - Epochs 6–30: last 2 EfficientNet blocks unfrozen (`lr=1e-4`, CosineAnnealingLR)
 
-**Validation metric:** Top-1 and Top-3 retrieval accuracy (not triplet loss) — embed all val images, find nearest neighbours, check if the correct card is returned.
+**Validation metric:** Top-1 and Top-3 retrieval accuracy — embed all val images, find nearest neighbours, check if the correct card is returned.
 
 **FAISS index:** `IndexFlatL2(512)` — exact nearest-neighbour search over 20k embeddings (~39 MB).
 
 
-### Phase 4 — Inference
+### Inference
 
 ```python
 from model.inference import CardIdentifier
@@ -161,38 +166,41 @@ for r in results:
     print(f"#{r['rank']} {r['name']} ({r['set_name']} #{r['number']}) — score {r['score']:.3f}")
 ```
 
-Returns top-3 candidates with a score in `(0, 1]` (higher = more similar). Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets (e.g., Pikachu appears in dozens of sets). The user can confirm the correct match.
+Returns top-3 candidates with a confidence score in `(0, 1]`. Top-3 is used rather than top-1 to handle the **reprint ambiguity** problem — many cards share identical artwork across sets. The user confirms the correct match before prices are fetched.
 
 
-### Phase 5 — Price Lookup (planned)
+### Price Lookup
 
-Query the **PriceCharting API** with the identified `(card_name, set, number)` to retrieve:
-- Ungraded market price
-- PSA 9 price
-- PSA 10 price
+Prices are fetched from the **Pokémon TCG API** (`api.pokemontcg.io`) using the card's ID, which maps directly to the API's card identifier (e.g. `base1-4`). No search step is needed.
 
+```python
+from pricing.price_lookup import PriceLookup
 
-### Phase 6 — Evaluation (planned)
+lookup = PriceLookup()
+prices = lookup.lookup(card)  # card is a dict from CardIdentifier.predict()
 
-- Top-1 and Top-3 accuracy on a real-world photo test set (~200–500 manually photographed cards)
-- Accuracy by: set era (vintage vs. modern), rarity, visual similarity to other cards
-- Domain gap analysis: confidence on clean reference images vs. real photos
+# {
+#   "variant":       "holofoil",
+#   "low":           8.50,
+#   "mid":           12.00,
+#   "high":          25.00,
+#   "market":        11.25,
+#   "tcgplayer_url": "https://www.tcgplayer.com/...",
+#   "updated_at":    "2026/02/20",
+# }
+```
 
+**Variant selection:** The API returns separate price tracks for different card variants (`normal`, `holofoil`, `reverseHolofoil`, `1stEditionHolofoil`, `1stEditionNormal`). The correct variant is selected automatically based on the card's rarity — holos get the `holofoil` track, everything else gets `normal`, with fallbacks if a variant isn't available.
 
-### Phase 7 — Demo App (planned)
-
-Streamlit app (`main.py`):
-- Upload a photo of a card
-- Model returns top-3 candidates with confidence scores
-- User confirms the correct card
-- App displays: name, set, number, rarity + ungraded / PSA 9 / PSA 10 prices
+**Caching:** Prices are cached locally in `pricing/price_cache.json` keyed by card ID. Repeated lookups for the same card skip the API entirely.
 
 
 ## Known Limitations
 
 | Limitation | Mitigation |
 |------------|-----------|
-| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms |
+| **Reprint ambiguity** — many cards share identical artwork across sets | Return top-3 results; user confirms before prices are fetched |
 | **Domain gap** — trained on clean official art, tested on real photos | Aggressive augmentation during training |
 | **57 promo cards** have no CDN image and are excluded from training | Listed in `data/failed_images.txt` |
-| **Very low resolution or heavy glare** photos | Model may return low confidence scores |
+| **Very low resolution or heavy glare** photos | Model returns low confidence scores |
+| **TCGPlayer prices only** — no graded (PSA/CGC) pricing | Out of scope; TCGPlayer market price covers the primary use case |

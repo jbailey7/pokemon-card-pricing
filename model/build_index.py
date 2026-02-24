@@ -22,7 +22,6 @@ log = logging.getLogger(__name__)
 
 
 def build_index(args: argparse.Namespace) -> None:
-    # Device
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -31,7 +30,6 @@ def build_index(args: argparse.Namespace) -> None:
         device = torch.device("cpu")
     log.info(f"Device: {device}")
 
-    # Load model 
     model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, pretrained=False)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -39,11 +37,9 @@ def build_index(args: argparse.Namespace) -> None:
     model.eval()
     log.info(f"Loaded checkpoint from {args.checkpoint} (epoch {checkpoint.get('epoch', '?')})")
 
-    # Load card metadata
     data_dir = Path(args.data_dir)
     df = pd.read_csv(data_dir / "cards.csv", dtype=str).fillna("")
 
-    # Reconstruct image paths, filter to existing
     def img_path(row: pd.Series) -> Path:
         safe_num = str(row["number"]).replace("/", "-")
         return data_dir / "images" / row["set_id"] / f"{safe_num}_hires.png"
@@ -57,15 +53,11 @@ def build_index(args: argparse.Namespace) -> None:
 
     log.info(f"Building index over {len(df):,} cards")
 
-    # Transform
     transform = build_val_transform()
-
-    # Embed all cards
     index = faiss.IndexFlatL2(EMBEDDING_DIM)
     metadata: list[dict] = []
-
-    batch_size = 64
     embeddings_list = []
+    batch_size = 64
 
     with torch.no_grad():
         for start in tqdm(range(0, len(df), batch_size), desc="Embedding cards", unit="batch"):
@@ -84,8 +76,7 @@ def build_index(args: argparse.Namespace) -> None:
             if not imgs:
                 continue
 
-            batch_tensor = torch.stack(imgs).to(device) 
-            emb = model(batch_tensor) 
+            emb = model(torch.stack(imgs).to(device))
             embeddings_list.append(emb.cpu())
 
             for row in valid_rows:
@@ -99,11 +90,10 @@ def build_index(args: argparse.Namespace) -> None:
                     "img_path": str(row["_img_path"]),
                 })
 
-    all_embeddings = torch.cat(embeddings_list, dim=0).numpy()  # (N, 512)
+    all_embeddings = torch.cat(embeddings_list, dim=0).numpy()
     index.add(all_embeddings)
     log.info(f"Index contains {index.ntotal:,} vectors")
 
-    # Save
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -114,9 +104,8 @@ def build_index(args: argparse.Namespace) -> None:
     with open(meta_path, "wb") as f:
         pickle.dump(metadata, f)
 
-    log.info(f"FAISS index saved to  {faiss_path}")
-    log.info(f"Metadata saved to     {meta_path}")
-    log.info(f"Index size: {faiss_path.stat().st_size / 1e6:.1f} MB")
+    log.info(f"FAISS index → {faiss_path} ({faiss_path.stat().st_size / 1e6:.1f} MB)")
+    log.info(f"Metadata    → {meta_path}")
 
 
 def parse_args() -> argparse.Namespace:

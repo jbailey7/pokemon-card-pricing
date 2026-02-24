@@ -9,3 +9,4 @@ data/pokemon-tcg-data/
 checkpoints/
 index/
 notebooks/.ipynb_checkpoints/
+pricing/price_cache.json

@@ -17,7 +17,6 @@ class CardIdentifier:
         index_dir: str | Path = "index/",
         device: str | None = None,
     ) -> None:
-        # Device
         if device is not None:
             self.device = torch.device(device)
         elif torch.cuda.is_available():
@@ -27,17 +26,14 @@ class CardIdentifier:
         else:
             self.device = torch.device("cpu")
 
-        # Model
         self.model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, pretrained=False)
         ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()
 
-        # Transform
         self.transform = build_val_transform()
 
-        # FAISS index
         index_dir = Path(index_dir)
         self.index = faiss.read_index(str(index_dir / "card_index.faiss"))
         with open(index_dir / "card_metadata.pkl", "rb") as f:
@@ -54,15 +50,13 @@ class CardIdentifier:
         with torch.no_grad():
             embedding = self.model(tensor)
 
-        query = embedding.cpu().numpy() 
-        distances, indices = self.index.search(query, k) 
+        distances, indices = self.index.search(embedding.cpu().numpy(), k)
 
         results = []
         for rank, (dist, idx) in enumerate(zip(distances[0], indices[0]), start=1):
-            score = float(1.0 / (1.0 + dist))
-            entry = dict(self.metadata[idx])  # copy
+            entry = dict(self.metadata[idx])  # copy so we don't mutate the metadata list
             entry["rank"] = rank
-            entry["score"] = round(score, 4)
+            entry["score"] = round(float(1.0 / (1.0 + dist)), 4)
             results.append(entry)
 
         return results
