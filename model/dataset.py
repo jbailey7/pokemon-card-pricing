@@ -10,7 +10,6 @@ from torchvision import transforms
 from model.constants import IMAGENET_MEAN, IMAGENET_STD, INPUT_SIZE
 
 
-# Transforms
 def build_train_transform() -> transforms.Compose:
     return transforms.Compose([
         transforms.Resize(256),
@@ -34,7 +33,6 @@ def build_val_transform() -> transforms.Compose:
     ])
 
 
-# Dataset
 class CardDataset(Dataset):
     def __init__(
         self,
@@ -50,7 +48,6 @@ class CardDataset(Dataset):
 
         df = pd.read_csv(cards_csv, dtype=str).fillna("")
 
-        # Reconstruct image paths and filter to existing images
         df["_img_path"] = df.apply(
             lambda r: self.data_dir / "images" / r["set_id"] / f"{r['number'].replace('/', '-')}_hires.png",
             axis=1,
@@ -64,7 +61,7 @@ class CardDataset(Dataset):
                 "Run data/download_cards.py first."
             )
 
-        # Assign integer labels — sorted for determinism
+        # Sort then shuffle for a deterministic but randomised train/val split
         all_ids = sorted(df["id"].unique())
         rng = random.Random(seed)
         rng.shuffle(all_ids)
@@ -80,7 +77,6 @@ class CardDataset(Dataset):
 
         df = df.reset_index(drop=True)
 
-        # Build label map from card id → integer
         split_ids = sorted(df["id"].unique())
         self.id_to_label: dict[str, int] = {cid: i for i, cid in enumerate(split_ids)}
         self.label_to_id: dict[int, str] = {i: cid for cid, i in self.id_to_label.items()}
@@ -94,19 +90,15 @@ class CardDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
-        img_path = self.img_paths[idx]
-        label = self.labels[idx]
-
-        img = Image.open(img_path).convert("RGB")
+        img = Image.open(self.img_paths[idx]).convert("RGB")
         if self.transform:
             img = self.transform(img)
-        return img, label
+        return img, self.labels[idx]
 
     def __getitems__(self, indices: list[int]) -> list[tuple[torch.Tensor, int]]:
         return [self.__getitem__(i) for i in indices]
 
     def get_metadata(self, idx: int) -> dict:
-        """Return card metadata dict for a given dataset index."""
         row = self.df.iloc[idx]
         return {
             "id":       row["id"],
@@ -118,7 +110,6 @@ class CardDataset(Dataset):
         }
 
 
-# PK Sampler
 class PKSampler(Sampler):
     def __init__(
         self,
@@ -130,7 +121,6 @@ class PKSampler(Sampler):
         self.p = p
         self.k = k
 
-        # Build label → list of indices map
         label_to_indices: dict[int, list[int]] = {}
         for idx, label in enumerate(labels):
             label_to_indices.setdefault(label, []).append(idx)
@@ -145,11 +135,9 @@ class PKSampler(Sampler):
 
     def __iter__(self):
         for _ in range(self.num_batches):
-            # Sample P classes at random
+            # P random classes, K samples each (with replacement for small classes)
             chosen_classes = random.sample(self.classes, min(self.p, len(self.classes)))
             batch = []
             for cls in chosen_classes:
-                indices = self.label_to_indices[cls]
-                # Sample K indices with replacement (handles classes with < K images)
-                batch.extend(random.choices(indices, k=self.k))
+                batch.extend(random.choices(self.label_to_indices[cls], k=self.k))
             yield batch

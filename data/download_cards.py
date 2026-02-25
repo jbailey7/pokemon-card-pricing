@@ -16,7 +16,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Paths
 DATA_DIR = Path(__file__).parent
 REPO_DIR = DATA_DIR / "pokemon-tcg-data"
 CARDS_EN_DIR = REPO_DIR / "cards" / "en"
@@ -27,9 +26,7 @@ FAILED_LOG = DATA_DIR / "failed_images.txt"
 TCG_DATA_REPO = "https://github.com/PokemonTCG/pokemon-tcg-data.git"
 
 
-# Download JSON metadata from GitHub
 def download_json_data() -> None:
-    """Clone or update the pokemon-tcg-data repo (JSON only, no images)."""
     if REPO_DIR.exists():
         log.info("pokemon-tcg-data repo already exists — pulling latest changes")
         result = subprocess.run(
@@ -42,15 +39,14 @@ def download_json_data() -> None:
         subprocess.run(
             [
                 "git", "clone",
-                "--depth", "1",          
-                "--filter=blob:none",    
-                "--sparse",              
+                "--depth", "1",
+                "--filter=blob:none",
+                "--sparse",
                 TCG_DATA_REPO,
                 str(REPO_DIR),
             ],
             check=True,
         )
-        # Check out cards/en and sets directories
         subprocess.run(
             ["git", "-C", str(REPO_DIR), "sparse-checkout", "set", "cards/en", "sets"],
             check=True,
@@ -58,14 +54,11 @@ def download_json_data() -> None:
         log.info("Clone complete")
 
 
-# Parse all set JSON files into a DataFrame
 def parse_all_sets() -> pd.DataFrame:
-    """Read all cards/en/*.json files and return a combined DataFrame."""
     set_files = sorted(CARDS_EN_DIR.glob("*.json"))
     if not set_files:
         raise FileNotFoundError(f"No JSON files found in {CARDS_EN_DIR}")
 
-    # Build set_id -> set_name lookup from sets/en.json
     sets_file = REPO_DIR / "sets" / "en.json"
     set_name_map: dict[str, str] = {}
     if sets_file.exists():
@@ -105,28 +98,20 @@ def parse_all_sets() -> pd.DataFrame:
     return df
 
 
-# Download images from CDN
 def download_images(df: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
-    """
-    Download hi-res images from the CDN.
-    Skips already-downloaded images (resumable).
-    Returns the DataFrame with an added `image_path` column.
-    """
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     failed = []
     image_paths = []
 
     rows_to_download = df if limit is None else df.head(limit)
-    skipped = 0
-    downloaded = 0
-    errors = 0
+    skipped = downloaded = errors = 0
 
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         for _, row in tqdm(rows_to_download.iterrows(), total=len(rows_to_download), desc="Downloading images", unit="card"):
             set_dir = IMAGES_DIR / row["set_id"]
             set_dir.mkdir(parents=True, exist_ok=True)
 
-            # Derive filename from card number — sanitise any slashes in promo numbers
+            # Sanitise slashes in promo card numbers (e.g. "SWSH001")
             safe_number = str(row["number"]).replace("/", "-")
             img_path = set_dir / f"{safe_number}_hires.png"
             rel_path = str(img_path.relative_to(DATA_DIR))
@@ -156,10 +141,8 @@ def download_images(df: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
 
             time.sleep(0.1)
 
-    # For any rows beyond the limit, set empty image path
-    remaining = [""] * (len(df) - len(rows_to_download))
     df = df.copy()
-    df["image_path"] = image_paths + remaining
+    df["image_path"] = image_paths + [""] * (len(df) - len(rows_to_download))
 
     log.info(f"Images — downloaded: {downloaded:,} | skipped: {skipped:,} | failed: {errors:,}")
 
@@ -170,39 +153,23 @@ def download_images(df: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
     return df
 
 
-
 def main():
     parser = argparse.ArgumentParser(description="Download Pokémon TCG card data and images")
-    parser.add_argument(
-        "--sets-only",
-        action="store_true",
-        help="Download metadata only, skip image downloads",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Only download this many images (useful for testing)",
-    )
+    parser.add_argument("--sets-only", action="store_true", help="Download metadata only, skip image downloads")
+    parser.add_argument("--limit", type=int, default=None, help="Only download this many images (useful for testing)")
     args = parser.parse_args()
 
-    # Step 1: get JSON data
     download_json_data()
-
-    # Step 2: parse into DataFrame
     df = parse_all_sets()
 
     if args.sets_only:
         df["image_path"] = ""
     else:
-        # Step 3: download images
         df = download_images(df, limit=args.limit)
 
-    # Step 4: save CSV
     df.to_csv(CARDS_CSV, index=False)
     log.info(f"Saved {len(df):,} rows to {CARDS_CSV}")
 
-    # Summary
     print("DOWNLOAD SUMMARY")
     print(f"Total cards:     {len(df):,}")
     print(f"Total sets:      {df['set_id'].nunique():,}")
