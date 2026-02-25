@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -6,6 +7,8 @@ from urllib.parse import urlencode
 
 import httpx
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -81,15 +84,15 @@ def fetch_variants(card: dict) -> list[dict] | None:
         resp.raise_for_status()
         body = resp.json()
     except Exception as e:
-        print(f"[pricing] request failed for {card['id']}: {e}")
+        log.warning("request failed for %s: %s", card['id'], e)
         return None
 
     cards = body.get("data", body) if isinstance(body, dict) else body
     if not isinstance(cards, list) or not cards:
-        print(f"[pricing] no results for '{name}'")
+        log.warning("no results for '%s'", name)
         return None
 
-    print(f"[pricing] {len(cards)} result(s) for '{name}' — looking for #{number} in '{set_name}'")
+    log.debug("%d result(s) for '%s' — looking for #%s in '%s'", len(cards), name, number, set_name)
 
     best = next(
         (c for c in cards
@@ -104,10 +107,10 @@ def fetch_variants(card: dict) -> list[dict] | None:
     matched_set = best.get("set_name", "?")
     matched_num = best.get("number", "?")
     if matched_set != set_name or matched_num != number:
-        print(f"[pricing] WARNING: wanted {set_name} #{number}, matched {matched_set} #{matched_num}")
+        log.warning("wanted %s #%s, matched %s #%s", set_name, number, matched_set, matched_num)
 
     raw = best.get("variants") or [best]
-    print(f"[pricing] {len(raw)} variant(s): {[(v.get('condition'), v.get('printing')) for v in raw]}")
+    log.debug("%d variant(s): %s", len(raw), [(v.get('condition'), v.get('printing')) for v in raw])
 
     if want_foil:
         typed = [v for v in raw if any(kw in v.get("printing", "").lower() for kw in FOIL_KEYWORDS)]
@@ -129,7 +132,7 @@ def fetch_variants(card: dict) -> list[dict] | None:
 
     variants = [to_variant_dict(v) for v in typed]
     for v in variants:
-        print(f"[pricing]   {v['label']}: market={v['market']}")
+        log.debug("  %s: market=%s", v['label'], v['market'])
 
     return variants
 
@@ -144,7 +147,7 @@ def get_variants(card: dict) -> list[dict] | None:
 
     entry = cache.get(card_id)
     if entry and now - entry.get("ts", 0) < CACHE_TTL:
-        print(f"[pricing] cache hit for {card_id}")
+        log.debug("cache hit for %s", card_id)
         return entry.get("variants")
 
     variants = fetch_variants(card)

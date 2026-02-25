@@ -262,7 +262,8 @@ def train(args: argparse.Namespace) -> None:
                 "Consider increasing margin or checking data diversity."
             )
 
-        if val_top1 > best_val_top1:
+        is_best = val_top1 > best_val_top1
+        if is_best:
             best_val_top1 = val_top1
 
         ckpt = {
@@ -277,7 +278,7 @@ def train(args: argparse.Namespace) -> None:
         with open(checkpoint_dir / "last_model.pt", "r+b") as f:
             os.fsync(f.fileno())
 
-        if val_top1 >= best_val_top1:
+        if is_best:
             torch.save(ckpt, checkpoint_dir / "best_model.pt")
             with open(checkpoint_dir / "best_model.pt", "r+b") as f:
                 os.fsync(f.fileno())

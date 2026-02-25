@@ -1,7 +1,7 @@
 [project]
 name = "pokemon-card-pricing"
 version = "0.1.0"
-description = "Pokémon card identifier — recognise a card from a photo and look up its market value"
+description = "Pokémon card identifier using metric learning — fine-tuned EfficientNet-B0 with nearest-neighbour retrieval over 20k cards, plus market price lookup"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "httpx>=0.28.1",

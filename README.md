@@ -1,6 +1,6 @@
-# pokemon-card-pricing
+# Pokemon Card Identifier
 
-A machine learning system that identifies a Pokémon card from a photo and looks up its current market price.
+Identifies a Pokémon card from a photo using a fine-tuned EfficientNet-B0 and nearest-neighbour retrieval over 20,000+ cards. After identification, fetches current market price via the JustTCG API.
 
 
 ## Overview
@@ -155,14 +155,14 @@ uv run python eval/evaluate.py
 
 Results are saved to `eval/real_photo_results.csv`. The photos themselves are gitignored (too large), but the ground truth labels and results file are committed so the evaluation is reproducible.
 
-Tested on 20 photos of cards taken with a phone camera (varied lighting, slight angles, card sleeves). The main failure modes were reprint confusion (correct Pokémon, wrong set) and one wrong-card miss on a 25th Anniversary promo — both edge cases for the top-3 UI flow.
+Tested on 50 photos of cards taken with a phone camera (varied lighting, slight angles, card sleeves). The main failure modes were wrong-card misses (4) and reprint confusion — correct Pokémon, wrong set (3).
 
-| Metric | Clean images (val set) | Real photos (n=20) |
+| Metric | Clean images (val set) | Real photos (n=50) |
 |--------|----------------------|--------------------|
-| Top-1  | 74.8%               | **90.0%**          |
-| Top-3  | 88.7%               | **95.0%**          |
+| Top-1  | 74.8%               | **86.0%**          |
+| Top-3  | 88.7%               | **92.0%**          |
 
-The real-photo numbers are higher than the val set figures, likely due to the small sample size and the fact that these cards were photographed with reasonable framing. The val set covers the full distribution of 2,002 card identities including many visually similar cards, making it the more conservative benchmark.
+The real-photo Top-1 is higher than the val set figure, which reflects that these photos were taken under controlled conditions (reasonable framing, adequate lighting). The val set covers the full distribution of 2,002 card identities including many visually similar cards from the same sets, making it the more conservative benchmark. The gap between Top-1 (85.7%) and Top-3 (91.8%) shows that reprint ambiguity — where the correct card appears in the shortlist but not at rank 1 — is the main remaining failure mode, which is why the app presents top-3 candidates for user confirmation rather than auto-selecting.
 
 
 ## How It Works

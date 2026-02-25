@@ -1,9 +1,15 @@
+import time
+
 import pytest
 
+import pricing.price_lookup as price_lookup
 from pricing.price_lookup import (
     edition_sort_key,
     is_foil,
     is_rare_edition,
+    load_cache,
+    save_cache,
+    get_variants,
     set_match,
     tcgplayer_url,
     to_variant_dict,
@@ -130,3 +136,60 @@ class TestTcgplayerUrl:
         card = {"name": "Mewtwo", "set_name": "Base Set"}
         url = tcgplayer_url(card)
         assert url.startswith("https://www.tcgplayer.com/search/pokemon/product?")
+
+
+class TestCache:
+    def test_load_cache_returns_empty_when_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(price_lookup, "CACHE_FILE", tmp_path / "cache.json")
+        assert load_cache() == {}
+
+    def test_save_and_load_roundtrip(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(price_lookup, "CACHE_FILE", tmp_path / "cache.json")
+        data = {"base1-4": {"variants": [{"label": "Unlimited"}], "ts": 1000.0}}
+        save_cache(data)
+        assert load_cache() == data
+
+    def test_load_cache_returns_empty_on_corrupt_file(self, monkeypatch, tmp_path):
+        cache_path = tmp_path / "cache.json"
+        cache_path.write_text("not valid json")
+        monkeypatch.setattr(price_lookup, "CACHE_FILE", cache_path)
+        assert load_cache() == {}
+
+
+class TestGetVariants:
+    def test_returns_none_when_no_api_key(self, monkeypatch):
+        monkeypatch.setattr(price_lookup, "API_KEY", "")
+        card = {"id": "base1-4", "name": "Charizard", "set_name": "Base Set",
+                "number": "4", "rarity": "Rare Holo"}
+        assert get_variants(card) is None
+
+    def test_returns_cached_result_without_network_call(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(price_lookup, "API_KEY", "fake-key")
+        monkeypatch.setattr(price_lookup, "CACHE_FILE", tmp_path / "cache.json")
+
+        variants = [{"label": "Unlimited Holofoil", "market": 12.50}]
+        save_cache({"base1-4": {"variants": variants, "ts": time.time()}})
+
+        card = {"id": "base1-4", "name": "Charizard", "set_name": "Base Set",
+                "number": "4", "rarity": "Rare Holo"}
+        assert get_variants(card) == variants
+
+    def test_expired_cache_triggers_fetch(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(price_lookup, "API_KEY", "fake-key")
+        monkeypatch.setattr(price_lookup, "CACHE_FILE", tmp_path / "cache.json")
+
+        # ts=0 is long expired
+        save_cache({"base1-4": {"variants": [], "ts": 0}})
+
+        fetched = []
+
+        def fake_fetch(card):
+            fetched.append(card["id"])
+            return None
+
+        monkeypatch.setattr(price_lookup, "fetch_variants", fake_fetch)
+
+        card = {"id": "base1-4", "name": "Charizard", "set_name": "Base Set",
+                "number": "4", "rarity": "Rare Holo"}
+        get_variants(card)
+        assert fetched == ["base1-4"]
