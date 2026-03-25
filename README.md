@@ -1,18 +1,34 @@
-# Pokemon Card Identifier
+# Pokémon Card Identifier & Pricer
 
-Identifies a Pokémon card from a photo using a fine-tuned EfficientNet-B0 and nearest-neighbour retrieval over 20,000+ cards. After identification, fetches current market price via the JustTCG API.
+![Demo](demo.gif)
 
+Upload a photo of any Pokémon card and instantly identify it — name, set, card number, rarity — then see current market prices and a 90-day price history. Built end-to-end: data pipeline, metric-learning model, embedding index, and a deployed web app.
 
-## Overview
+**86% top-1 accuracy · 92% top-3 accuracy · 20,078 cards · live market pricing**
 
-**Card Identification (Computer Vision)**
-Takes a photo of a Pokémon card and identifies exactly which card it is: name, set, card number, and rarity.
+---
 
-**Price Lookup**
-Fetches Near Mint market price and 90-day low/high from the JustTCG API (free tier), then links to the card's TCGPlayer listing.
+## What Was Built
 
-**Output:**
-Point your camera at a card and get the identity, current market price, 90-day range, and a direct TCGPlayer link.
+This project covers the full ML engineering stack, from raw data to a deployed application:
+
+- **Custom data pipeline** — downloads and processes 20,000+ card images and metadata from the PokémonTCG dataset
+- **Metric learning model** — EfficientNet-B0 fine-tuned with online batch-hard triplet loss to produce discriminative 512-d card embeddings
+- **Embedding index** — all 20k cards embedded at build time; inference is a single matrix multiply (~41 MB, sub-second on CPU)
+- **Streamlit web app** — upload a photo; top-5 candidates shown with confidence scores; user confirms before prices are fetched
+- **Live pricing** — JustTCG API integration with edition/condition filtering, 90-day trend, anomaly detection, and a 12-hour local cache
+
+## Tech Stack
+
+| Area | Technologies |
+|------|-------------|
+| **Model** | PyTorch, EfficientNet-B0, batch-hard triplet loss |
+| **Data** | NumPy, Pillow, torchvision transforms |
+| **App** | Streamlit |
+| **Pricing API** | JustTCG API, httpx |
+| **Tooling** | Python 3.12, uv |
+
+---
 
 
 ## Project Structure
@@ -333,4 +349,4 @@ For this project, swapping in a different source only requires updating `pricing
 | **Domain gap** — trained on clean official art, tested on real photos | Aggressive augmentation during training |
 | **57 promo cards** have no CDN image and are excluded from training | Listed in `data/failed_images.txt` |
 | **Very low resolution or heavy glare** photos | Model returns low confidence scores |
-| **No graded (PSA/CGC) pricing** | Out of scope; TCGPlayer covers the primary use case |
+| **Graded (PSA/CGC) card prices excluded** | Graded prices are orders of magnitude higher than raw cards and would mislead users; filtered intentionally |

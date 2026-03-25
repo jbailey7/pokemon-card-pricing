@@ -5,7 +5,7 @@ import streamlit as st
 from PIL import Image
 
 from model.inference import CardIdentifier
-from pricing.price_lookup import get_variants, tcgplayer_url
+from pricing.price_lookup import get_variants, tcgplayer_url, _api_key
 
 CHECKPOINT = "checkpoints/best_model.pt"
 INDEX_DIR  = "index/"
@@ -178,8 +178,10 @@ def main():
                 st.caption(f"as of {as_of} · via JustTCG")
             else:
                 st.caption("via JustTCG")
-        else:
+        elif not _api_key():
             st.info("No price data — add a JUSTTCG_API_KEY to .env to enable pricing.")
+        else:
+            st.warning("No price data returned for this card. It may not be in the JustTCG database, or the card number/set couldn't be matched confidently.")
 
         st.link_button("View on TCGPlayer", tcgplayer_url(card), use_container_width=True)
 

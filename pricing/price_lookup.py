@@ -10,16 +10,23 @@ from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
-load_dotenv()
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_PATH)
 
 CACHE_FILE = Path("pricing/price_cache.json")
 CACHE_TTL  = 12 * 60 * 60  # 12 hours
 
 API_BASE = "https://api.justtcg.com/v1"
-API_KEY  = os.getenv("JUSTTCG_API_KEY", "")
+
+
+def _api_key() -> str:
+    """Read the API key fresh each call so it works regardless of import order."""
+    load_dotenv(_ENV_PATH, override=True)
+    return os.getenv("JUSTTCG_API_KEY", "")
 
 FOIL_KEYWORDS     = ("holo", "foil")
 RARE_EDITION_KEYS = ("1st", "1sted", "shadowless")
+GRADED_KEYWORDS   = ("psa", "bgs", "cgc", "sgc", "graded", "beckett")
 
 
 def load_cache() -> dict:
@@ -43,6 +50,21 @@ def is_foil(rarity: str) -> bool:
 def is_rare_edition(printing: str) -> bool:
     p = printing.lower()
     return any(kw in p for kw in RARE_EDITION_KEYS)
+
+
+def norm_number(n: str) -> str:
+    """Normalise card numbers for comparison.
+
+    JustTCG returns numbers like '004/102'; our metadata stores '4'.
+    Strip the set-total suffix, leading zeros, and lowercase so both sides
+    compare on just the card number.
+    """
+    base = str(n).split("/")[0].strip()
+    return base.lower().lstrip("0") or "0"
+
+
+def number_match(our_num: str, api_num: str) -> bool:
+    return norm_number(our_num) == norm_number(str(api_num))
 
 
 def set_match(our_name: str, api_name: str) -> bool:
@@ -77,7 +99,7 @@ def fetch_variants(card: dict) -> list[dict] | None:
     want_foil = is_foil(card.get("rarity", ""))
 
     params  = {"game": "pokemon", "q": name}
-    headers = {"X-API-Key": API_KEY}
+    headers = {"X-API-Key": _api_key()}
 
     try:
         resp = httpx.get(f"{API_BASE}/cards", params=params, headers=headers, timeout=15)
@@ -96,13 +118,14 @@ def fetch_variants(card: dict) -> list[dict] | None:
 
     best = next(
         (c for c in cards
-         if str(c.get("number", "")) == number and set_match(set_name, c.get("set_name", ""))),
+         if number_match(number, c.get("number", "")) and set_match(set_name, c.get("set_name", ""))),
         None,
     )
     if best is None:
-        best = next((c for c in cards if str(c.get("number", "")) == number), None)
+        best = next((c for c in cards if number_match(number, c.get("number", ""))), None)
     if best is None:
-        best = cards[0]
+        log.warning("no confident match for %s #%s in '%s' — skipping price", name, number, set_name)
+        return None
 
     matched_set = best.get("set_name", "?")
     matched_num = best.get("number", "?")
@@ -119,6 +142,18 @@ def fetch_variants(card: dict) -> list[dict] | None:
 
     if not typed:
         typed = raw
+
+    # Strip graded (PSA/BGS/CGC etc.) variants — their prices are orders of magnitude
+    # higher than raw cards and would mislead users comparing against TCGPlayer.
+    ungraded = [
+        v for v in typed
+        if not any(kw in v.get("printing", "").lower() for kw in GRADED_KEYWORDS)
+        and not any(kw in v.get("condition", "").lower() for kw in GRADED_KEYWORDS)
+    ]
+    if ungraded:
+        typed = ungraded
+    else:
+        log.warning("only graded variants found for %s — returning them anyway", name)
 
     condition_order = ["near mint", "lightly played", "moderately played", "heavily played", "damaged"]
 
@@ -138,7 +173,7 @@ def fetch_variants(card: dict) -> list[dict] | None:
 
 
 def get_variants(card: dict) -> list[dict] | None:
-    if not API_KEY:
+    if not _api_key():
         return None
 
     cache   = load_cache()
