@@ -1,6 +1,6 @@
 # Pokémon Card Identifier & Pricer
 
-![Demo](docs/demo.gif)
+<img src="docs/demo.gif" width="80%" alt="Demo">
 
 Upload a photo of any Pokémon card and instantly identify it — name, set, card number, rarity — then see current market prices and a 90-day price history. Built end-to-end: data pipeline, metric-learning model, embedding index, and a deployed web app.
 
