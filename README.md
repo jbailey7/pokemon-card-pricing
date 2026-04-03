@@ -1,6 +1,6 @@
 # Pokemon Card Identifier
 
-Identifies a Pokémon card from a photo using a fine-tuned EfficientNet-B0 and nearest-neighbour retrieval over 20,000+ cards. After identification, fetches current market price via the JustTCG API.
+Identifies a Pokémon card from a photo using a fine-tuned EfficientNet-B0 and nearest-neighbor retrieval over 20,000+ cards. After identification, fetches current market price via the JustTCG API.
 
 
 ## Overview
