@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pokémon Card Pricer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #14161a;
+         color: #e8e8e8; margin: 0; display: flex; flex-direction: column;
+         align-items: center; justify-content: center;
+         justify-content: safe center;  /* avoid top-clipping when results overflow */
+         min-height: 100vh; padding: 1.5rem; }
+  h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 1rem; }
+  /* Stage fills the viewport: as wide as fits while keeping the 4:3 video
+     (capture is 640x480) fully on screen, reserving ~170px for the heading,
+     status line and padding. The guide outline scales with it — geometry is
+     fractional on both sides, so backend alignment is unaffected. */
+  #stage { position: relative;
+           width: min(1280px, 95vw, calc((100vh - 170px) * 4 / 3)); }
+  video, #overlay { width: 100%; border-radius: 12px; display: block; }
+  /* Mirror the PREVIEW only, like a selfie camera — moving the card left moves
+     it left on screen. Frames sent to the backend are unaffected: drawImage()
+     reads the video's intrinsic (unmirrored) frames, and the model must see
+     unmirrored cards (trained without horizontal flips — set symbols are
+     position-meaningful). The guide overlay is horizontally centred and
+     symmetric, so it needs no mirroring to stay aligned. */
+  video { transform: scaleX(-1); }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+             pointer-events: none; }
+  #status { margin: 0.8rem 0; font-size: 1rem; min-height: 1.4em; color: #aaa; }
+  #results, #prices { width: 640px; max-width: 95vw; }
+  .match { display: flex; gap: 12px; align-items: center; background: #1e2128;
+           border: 1px solid #333; border-radius: 10px; padding: 10px;
+           margin-bottom: 8px; cursor: pointer; }
+  .match:hover { border-color: #4a9eff; }
+  .match img { width: 60px; border-radius: 4px; }
+  .match .meta { flex: 1; }
+  .match .name { font-weight: 600; }
+  .match .sub, .sim { color: #999; font-size: 0.85rem; }
+  .warn { background: #3a2e12; border: 1px solid #8a6d1a; color: #f0c95c;
+          border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 0.9rem; }
+  .metrics { display: flex; gap: 12px; margin: 10px 0; }
+  .metric { background: #1e2128; border-radius: 10px; padding: 10px 14px; flex: 1; }
+  .metric .label { color: #999; font-size: 0.8rem; }
+  .metric .value { font-size: 1.3rem; font-weight: 600; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .chip { border: 1px solid #444; border-radius: 999px; padding: 4px 12px;
+          cursor: pointer; font-size: 0.85rem; background: none; color: #ddd; }
+  .chip.active { background: #4a9eff; border-color: #4a9eff; color: #fff; }
+  button.big { background: #4a9eff; color: #fff; border: 0; border-radius: 8px;
+               padding: 10px 18px; font-size: 0.95rem; cursor: pointer; margin-top: 10px; }
+  a.tcg { color: #4a9eff; }
+  .hidden { display: none !important; }
+  .asof { color: #777; font-size: 0.8rem; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>Pokémon Card Pricer</h1>
+
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+<div id="status">Starting camera…</div>
+
+<div id="results" class="hidden">
+  <p>Which card is this?</p>
+  <div id="matches"></div>
+  <div id="idWarning" class="warn hidden"></div>
+</div>
+
+<div id="prices" class="hidden"></div>
+<button id="again" class="big hidden">Scan another</button>
+
+<canvas id="capture" class="hidden"></canvas>
+
+<script>
+// Mirrors model/card_detector.py — keep in sync
+const CARD_ASPECT = 63 / 88;
+const GUIDE_HEIGHT_FRAC = 0.70;
+const FRAME_INTERVAL_MS = 100;
+const CAPTURE_W = 640, CAPTURE_H = 480;
+
+const MESSAGES = {
+  no_card:      "No card detected",
+  too_far:      "Move the card closer",
+  out_of_frame: "Centre the card in view",
+  detecting:    "Card detected — hold it steady",
+  stable:       "Hold still…",
+};
+const COLORS = { no_card: "#888", too_far: "#e8b23c", out_of_frame: "#e8b23c",
+                 detecting: "#e8b23c", stable: "#57d977", identified: "#57d977" };
+
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const capture = document.getElementById("capture");
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+const matchesEl = document.getElementById("matches");
+const idWarningEl = document.getElementById("idWarning");
+const pricesEl = document.getElementById("prices");
+const againBtn = document.getElementById("again");
+
+let paused = false;
+
+function drawGuide(status) {
+  // Draw in the video's intrinsic coordinate space and let CSS stretch the
+  // canvas over the displayed video. Guide geometry is fractional on both
+  // sides, so this stays aligned with the backend (guide_rect) regardless
+  // of how the page is laid out — measuring clientWidth/clientHeight here
+  // proved unreliable (canvas sized ~1/3 of the video on some layouts).
+  const w = overlay.width = video.videoWidth || CAPTURE_W;
+  const h = overlay.height = video.videoHeight || CAPTURE_H;
+  const ctx = overlay.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  const gh = h * GUIDE_HEIGHT_FRAC, gw = gh * CARD_ASPECT;
+  const x = (w - gw) / 2, y = (h - gh) / 2;
+  ctx.strokeStyle = COLORS[status] || "#888";
+  ctx.lineWidth = 3;
+  ctx.setLineDash(status === "no_card" ? [10, 8] : []);
+  ctx.beginPath();
+  ctx.roundRect(x, y, gw, gh, 14);
+  ctx.stroke();
+}
+
+function captureBlob() {
+  capture.width = CAPTURE_W; capture.height = CAPTURE_H;
+  capture.getContext("2d").drawImage(video, 0, 0, CAPTURE_W, CAPTURE_H);
+  return new Promise(res => capture.toBlob(res, "image/jpeg", 0.75));
+}
+
+// Response-driven capture loop: the next frame is scheduled only after the
+// previous response arrives — requests never overlap (server state is
+// single-user). Do NOT convert this to setInterval.
+async function loop() {
+  if (paused) return;
+  const t0 = performance.now();
+  try {
+    const blob = await captureBlob();
+    const form = new FormData();
+    form.append("file", blob, "frame.jpg");
+    const resp = await fetch("/frame", { method: "POST", body: form });
+    const data = await resp.json();
+    handle(data);
+  } catch (e) {
+    statusEl.textContent = "Server unreachable — is uvicorn running?";
+  }
+  if (!paused) {
+    const dt = performance.now() - t0;
+    setTimeout(loop, Math.max(0, FRAME_INTERVAL_MS - dt));
+  }
+}
+
+function handle(data) {
+  drawGuide(data.status);
+  if (data.status === "identified") {
+    paused = true;                      // pause the loop; /reset resumes
+    statusEl.textContent = "Card identified";
+    showMatches(data.matches, data.warning);
+    return;
+  }
+  statusEl.textContent = MESSAGES[data.status] || data.status;
+}
+
+function showMatches(matches, warning) {
+  matchesEl.innerHTML = "";
+  resultsEl.classList.remove("hidden");
+  againBtn.classList.remove("hidden");
+  idWarningEl.classList.toggle("hidden", !warning);
+  if (warning) idWarningEl.textContent = warning;
+
+  for (const m of matches) {
+    const div = document.createElement("div");
+    div.className = "match";
+    div.innerHTML = `
+      ${m.image_url ? `<img src="${m.image_url}" alt="">` : ""}
+      <div class="meta">
+        <div class="name"></div>
+        <div class="sub"></div>
+        <div class="sim">Match similarity: ${(m.score * 100).toFixed(0)}%</div>
+      </div>`;
+    div.querySelector(".name").textContent = m.name;
+    div.querySelector(".sub").textContent = `${m.set_name} · #${m.number} · ${m.rarity}`;
+    div.onclick = () => confirmCard(m);
+    matchesEl.appendChild(div);
+  }
+  if (!matches.length) {
+    matchesEl.innerHTML = "<p>No matches returned.</p>";
+  }
+}
+
+async function confirmCard(card) {
+  resultsEl.classList.add("hidden");
+  pricesEl.classList.remove("hidden");
+  pricesEl.innerHTML = "<p>Fetching prices…</p>";
+  const resp = await fetch("/price", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(card),
+  });
+  renderPrices(card, await resp.json());
+}
+
+function renderPrices(card, data) {
+  pricesEl.innerHTML = "";
+  const h = document.createElement("h2");
+  h.textContent = `${card.name} — ${card.set_name} #${card.number}`;
+  h.style.fontSize = "1.1rem";
+  pricesEl.appendChild(h);
+
+  if (!data.available) {
+    pricesEl.insertAdjacentHTML("beforeend",
+      `<p>No price data — add a JUSTTCG_API_KEY to .env to enable pricing.</p>`);
+    addTcgLink(data.tcgplayer_url);
+    return;
+  }
+
+  if (data.set_number_mismatch) {
+    const w = document.createElement("div");
+    w.className = "warn";
+    w.textContent = `⚠ No exact match found — prices shown are for ` +
+      `${data.matched_set_name} #${data.matched_number}. Verify on TCGPlayer.`;
+    pricesEl.appendChild(w);
+  }
+  if (data.printing_filter_fallback) {
+    pricesEl.insertAdjacentHTML("beforeend",
+      `<div class="warn">No prices for the expected finish — showing all printings.</div>`);
+  }
+
+  const printings = [...new Set(data.variants.map(v => v.printing))];
+  let selPrinting = printings[0];
+
+  const printingChips = document.createElement("div");
+  printingChips.className = "chips";
+  pricesEl.appendChild(printingChips);
+  const detail = document.createElement("div");
+  pricesEl.appendChild(detail);
+
+  function renderDetail() {
+    const pv = data.variants.filter(v => v.printing === selPrinting);
+    const conditions = [...new Set(pv.map(v => v.condition))]
+      .sort((a, b) => data.condition_order.indexOf(a) - data.condition_order.indexOf(b));
+    let selCondition = conditions[0];
+
+    function fmt(v) { return v == null ? "—" : "$" + v.toFixed(2); }
+
+    function paint() {
+      const p = pv.find(v => v.condition === selCondition) || pv[0];
+      const chg = p.change_90d == null ? "" :
+        ` <span class="sub">(${p.change_90d > 0 ? "+" : ""}${p.change_90d.toFixed(1)}% 90d)</span>`;
+      let html = `<div class="chips">` + conditions.map(c =>
+        `<button class="chip ${c === selCondition ? "active" : ""}" data-c="${c}">${c}</button>`
+      ).join("") + `</div>
+      <div class="metrics">
+        <div class="metric"><div class="label">Market price</div><div class="value">${fmt(p.market)}${chg}</div></div>
+        <div class="metric"><div class="label">90d low</div><div class="value">${fmt(p.low_90d)}</div></div>
+        <div class="metric"><div class="label">90d high</div><div class="value">${fmt(p.high_90d)}</div></div>
+      </div>`;
+      const vio = (data.violations_by_printing || {})[selPrinting];
+      if (vio && vio.length) {
+        const lines = vio.map(([better, pb, worse, pw]) =>
+          `${worse} (${fmt(pw)}) > ${better} (${fmt(pb)})`).join("; ");
+        html += `<div class="warn">⚠ Prices appear out of order: ${lines}. Usually sparse
+                 recent sales — verify on TCGPlayer.</div>`;
+      }
+      if (p.updated_at) {
+        const d = new Date(p.updated_at * 1000);
+        html += `<div class="asof">as of ${d.toLocaleDateString()} · via JustTCG</div>`;
+      } else {
+        html += `<div class="asof">via JustTCG</div>`;
+      }
+      detail.innerHTML = html;
+      detail.querySelectorAll(".chip").forEach(b =>
+        b.onclick = () => { selCondition = b.dataset.c; paint(); });
+    }
+    paint();
+  }
+
+  printingChips.innerHTML = printings.map(p =>
+    `<button class="chip ${p === selPrinting ? "active" : ""}" data-p="${p}">${p || "Standard"}</button>`
+  ).join("");
+  printingChips.querySelectorAll(".chip").forEach(b =>
+    b.onclick = () => {
+      selPrinting = b.dataset.p;
+      printingChips.querySelectorAll(".chip").forEach(x =>
+        x.classList.toggle("active", x === b));
+      renderDetail();
+    });
+
+  renderDetail();
+  addTcgLink(data.tcgplayer_url);
+}
+
+function addTcgLink(url) {
+  if (!url) return;
+  pricesEl.insertAdjacentHTML("beforeend",
+    `<p><a class="tcg" href="${url}" target="_blank" rel="noopener">View on TCGPlayer →</a></p>`);
+}
+
+againBtn.onclick = async () => {
+  await fetch("/reset", { method: "POST" });   // clears server-side scan state
+  resultsEl.classList.add("hidden");
+  pricesEl.classList.add("hidden");
+  againBtn.classList.add("hidden");
+  statusEl.textContent = "";
+  paused = false;
+  loop();                                       // resume the capture loop
+};
+
+async function start() {
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({
+      video: { width: CAPTURE_W, height: CAPTURE_H }, audio: false,
+    });
+    await new Promise(r => video.onloadedmetadata = r);
+    drawGuide("no_card");
+    statusEl.textContent = MESSAGES.no_card;
+    loop();
+  } catch (e) {
+    statusEl.textContent =
+      "Camera unavailable. Use http://localhost (getUserMedia needs a secure context) " +
+      "and grant camera permission.";
+  }
+}
+start();
+</script>
+</body>
+</html>

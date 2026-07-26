@@ -70,10 +70,16 @@ class TestPairwiseL2Distance:
         assert (dist >= 0).all()
 
     def test_identical_vectors_have_zero_distance(self):
-        v = F.normalize(torch.randn(1, 16), dim=1)
+        # atol matches test_diagonal_is_zero: the implementation adds 1e-8
+        # inside sqrt (floor of 1e-4), and float32 error in dot(v, v) for a
+        # normalized v adds up to ~1e-7 to the squared distance (~4e-4 after
+        # sqrt). atol=1e-4 was flaky for unlucky random vectors. Seeded for
+        # determinism.
+        g = torch.Generator().manual_seed(0)
+        v = F.normalize(torch.randn(1, 16, generator=g), dim=1)
         embs = v.repeat(4, 1)
         dist = pairwise_l2_distance(embs)
-        assert torch.allclose(dist, torch.zeros(4, 4), atol=1e-4)
+        assert torch.allclose(dist, torch.zeros(4, 4), atol=1e-3)
 
 
 class TestBatchHardTripletLoss:

@@ -1,6 +1,22 @@
 # Pokemon Card Identifier
 
-Identifies a Pokémon card from a photo using a fine-tuned EfficientNet-B0 and nearest-neighbor retrieval over 20,000+ cards. After identification, fetches current market price via the JustTCG API.
+Identifies a Pokémon card live from your laptop camera using a fine-tuned EfficientNet-B0 and nearest-neighbor retrieval over 20,000+ cards. Hold a card up to the camera — the app detects it, waits for it to be held steady, identifies it, and fetches the current market price via the JustTCG API.
+
+## Run the app
+
+```bash
+uv run uvicorn server:app --reload
+```
+
+Then open **http://localhost:8000** and allow camera access.
+
+> **Note:** the camera (`getUserMedia`) requires a secure context — it works on
+> `http://localhost` but **not** over a LAN IP without HTTPS.
+
+Without the trained card detector (`model/card_detector.pt`) the server runs with a
+stub detector that treats the guide rectangle as the card location. Without
+`checkpoints/` + `index/`, identification returns no matches. Without a JustTCG
+API key, pricing is unavailable and only the TCGPlayer link is shown.
 
 
 ## Overview
@@ -29,9 +45,12 @@ pokemon-card-pricing/
 │   ├── dataset.py            — CardDataset, PKSampler, augmentation pipeline
 │   ├── train.py              — training loop with online hard triplet mining
 │   ├── build_index.py        — embed all cards -> numpy embeddings array
-│   └── inference.py          — CardIdentifier class
+│   ├── inference.py          — CardIdentifier class
+│   ├── checkpoint_utils.py   — index/checkpoint version coupling
+│   └── card_detector.py      — YOLOv8n wrapper (frame-skip, guide-IoU checks)
 ├── pricing/
 │   ├── price_lookup.py       — JustTCG API client + TCGPlayer URL builder
+│   ├── display.py            — price formatting + sanity-check helpers
 │   └── price_cache.json      — 12-hour price cache (local only)
 ├── eval/
 │   ├── find_card.py          — look up a card_id by name / set / number
@@ -42,10 +61,10 @@ pokemon-card-pricing/
 │   ├── training_log.csv      — per-epoch metrics from the training run
 │   ├── training_curves.png   — loss and accuracy plots
 │   └── plot_training.py      — script that regenerates the PNG
-├── tests/
-│   ├── test_pricing.py       — unit tests for pricing helpers
-│   └── test_app.py           — unit tests for app helpers
-├── main.py                   — Streamlit app
+├── frontend/
+│   └── index.html            — camera UI (guide overlay, response-driven loop)
+├── tests/                    — unit tests (models mocked; pass on fresh clone)
+├── server.py                 — FastAPI app: /frame, /price, /reset
 └── pyproject.toml
 ```
 
@@ -162,7 +181,7 @@ Tested on 50 photos of cards taken with a phone camera (varied lighting, slight 
 | Top-1  | 74.8%               | **86.0%**          |
 | Top-3  | 88.7%               | **92.0%**          |
 
-The real-photo Top-1 is higher than the val set figure, which reflects that these photos were taken under controlled conditions (reasonable framing, adequate lighting). The val set covers the full distribution of 2,002 card identities including many visually similar cards from the same sets, making it the more conservative benchmark. The gap between Top-1 (85.7%) and Top-3 (91.8%) shows that reprint ambiguity — where the correct card appears in the shortlist but not at rank 1 — is the main remaining failure mode, which is why the app presents top-3 candidates for user confirmation rather than auto-selecting.
+The real-photo Top-1 is higher than the val set figure, which reflects that these photos were taken under controlled conditions (reasonable framing, adequate lighting). The val set covers the full distribution of 2,002 card identities including many visually similar cards from the same sets, making it the more conservative benchmark. The gap between Top-1 (86.0%) and Top-3 (92.0%) shows that reprint ambiguity — where the correct card appears in the shortlist but not at rank 1 — is the main remaining failure mode, which is why the app presents top-3 candidates for user confirmation rather than auto-selecting.
 
 
 ## How It Works

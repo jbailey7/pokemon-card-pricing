@@ -9,6 +9,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
+from model.checkpoint_utils import write_index_info
 from model.constants import EMBEDDING_DIM
 from model.dataset import build_val_transform
 from model.embedding_model import EmbeddingModel
@@ -31,7 +32,7 @@ def build_index(args: argparse.Namespace) -> None:
     log.info(f"Device: {device}")
 
     model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, pretrained=False)
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()
@@ -101,8 +102,11 @@ def build_index(args: argparse.Namespace) -> None:
     with open(meta_path, "wb") as f:
         pickle.dump(metadata, f)
 
+    info_path = write_index_info(output_dir, checkpoint)
+
     log.info(f"Embeddings -> {emb_path} ({emb_path.stat().st_size / 1e6:.1f} MB, {len(all_embeddings):,} vectors)")
     log.info(f"Metadata   -> {meta_path}")
+    log.info(f"Index info -> {info_path} (checkpoint epoch {checkpoint.get('epoch', '?')})")
 
 
 def parse_args() -> argparse.Namespace:

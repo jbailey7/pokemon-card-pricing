@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from model.checkpoint_utils import verify_index_info
 from model.constants import EMBEDDING_DIM
 from model.dataset import build_val_transform
 from model.embedding_model import EmbeddingModel
@@ -27,7 +28,8 @@ class CardIdentifier:
             self.device = torch.device("cpu")
 
         self.model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, pretrained=False)
-        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
+        # weights_only=True: checkpoint is tensors + primitives only (fix #3)
+        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=True)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()
@@ -35,6 +37,8 @@ class CardIdentifier:
         self.transform = build_val_transform()
 
         index_dir = Path(index_dir)
+        # Refuse to run against an index built from a different checkpoint (fix #7)
+        verify_index_info(index_dir, ckpt)
         self.embeddings = np.load(index_dir / "card_embeddings.npy")  # (N, 512)
         with open(index_dir / "card_metadata.pkl", "rb") as f:
             self.metadata: list[dict] = pickle.load(f)

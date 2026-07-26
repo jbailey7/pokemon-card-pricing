@@ -12,3 +12,5 @@ notebooks/.ipynb_checkpoints/
 pricing/price_cache.json
 eval/photos/
 CLAUDE.local.md
+.DS_Store
+model/card_detector.pt

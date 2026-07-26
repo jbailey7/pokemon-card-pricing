@@ -12,7 +12,8 @@ log = logging.getLogger(__name__)
 
 load_dotenv()
 
-CACHE_FILE = Path("pricing/price_cache.json")
+# Anchored to this file's directory so the app works from any cwd (fix #2)
+CACHE_FILE = Path(__file__).parent / "price_cache.json"
 CACHE_TTL  = 12 * 60 * 60  # 12 hours
 
 API_BASE = "https://api.justtcg.com/v1"
@@ -20,6 +21,23 @@ API_KEY  = os.getenv("JUSTTCG_API_KEY", "")
 
 FOIL_KEYWORDS     = ("holo", "foil")
 RARE_EDITION_KEYS = ("1st", "1sted", "shadowless")
+
+# Rarities that only exist as foil printings (fix #5). The old check
+# ("holo" in rarity) missed every modern foil-only rarity, filtering to
+# non-foil variants that don't exist and silently falling back to all
+# variants — potentially pricing the wrong printing.
+# TODO(data audit): verify against the full rarity vocabulary in
+# data/cards.csv (local-only file) and extend as needed.
+FOIL_ONLY_RARITIES = {
+    "rare holo", "rare holo ex", "rare holo gx", "rare holo lv.x",
+    "rare holo star", "rare holo v", "rare holo vmax", "rare holo vstar",
+    "rare ultra", "rare secret", "rare rainbow", "rare shiny",
+    "rare shiny gx", "rare shining", "rare prism star", "rare ace",
+    "rare break", "rare prime", "amazing rare", "radiant rare",
+    "illustration rare", "special illustration rare", "ultra rare",
+    "hyper rare", "double rare", "shiny rare", "shiny ultra rare",
+    "trainer gallery rare holo", "legend", "ace spec rare",
+}
 
 
 def load_cache() -> dict:
@@ -37,12 +55,25 @@ def save_cache(cache: dict):
 
 
 def is_foil(rarity: str) -> bool:
-    return "holo" in rarity.lower()
+    r = rarity.strip().lower()
+    return r in FOIL_ONLY_RARITIES or "holo" in r
 
 
 def is_rare_edition(printing: str) -> bool:
     p = printing.lower()
     return any(kw in p for kw in RARE_EDITION_KEYS)
+
+
+def normalize_number(num) -> str:
+    """Normalize a card number for comparison (fix #6).
+
+    Formats differ in the wild: '4' vs '4/102' vs '004'. Strip any '/total'
+    suffix and leading zeros so equivalent numbers compare equal. Preserves
+    non-numeric prefixes/suffixes (promo numbers like 'SWSH039', 'TG12').
+    """
+    base = str(num).split("/")[0].strip()
+    stripped = base.lstrip("0")
+    return stripped if stripped else base
 
 
 def set_match(our_name: str, api_name: str) -> bool:
@@ -70,7 +101,18 @@ def to_variant_dict(v: dict) -> dict:
     }
 
 
-def fetch_variants(card: dict) -> list[dict] | None:
+def fetch_variants(card: dict) -> dict | None:
+    """Query JustTCG and return a result dict, or None on failure.
+
+    Result shape (fix #1 — match quality is surfaced, not just logged):
+        {
+            "variants": [ ...variant dicts... ],
+            "matched_set_name": str,       # what the API match actually was
+            "matched_number": str,
+            "set_number_mismatch": bool,   # True → price may be for the wrong card
+            "printing_filter_fallback": bool,  # True → foil/non-foil filter found
+        }                                      #   nothing; showing all printings
+    """
     name      = card["name"]
     number    = str(card["number"])
     set_name  = card["set_name"]
@@ -94,19 +136,24 @@ def fetch_variants(card: dict) -> list[dict] | None:
 
     log.debug("%d result(s) for '%s' — looking for #%s in '%s'", len(cards), name, number, set_name)
 
+    num_norm = normalize_number(number)
+
+    def number_matches(c: dict) -> bool:
+        return normalize_number(c.get("number", "")) == num_norm
+
     best = next(
-        (c for c in cards
-         if str(c.get("number", "")) == number and set_match(set_name, c.get("set_name", ""))),
+        (c for c in cards if number_matches(c) and set_match(set_name, c.get("set_name", ""))),
         None,
     )
     if best is None:
-        best = next((c for c in cards if str(c.get("number", "")) == number), None)
+        best = next((c for c in cards if number_matches(c)), None)
     if best is None:
         best = cards[0]
 
     matched_set = best.get("set_name", "?")
     matched_num = best.get("number", "?")
-    if matched_set != set_name or matched_num != number:
+    mismatch = not (number_matches(best) and set_match(set_name, matched_set))
+    if mismatch:
         log.warning("wanted %s #%s, matched %s #%s", set_name, number, matched_set, matched_num)
 
     raw = best.get("variants") or [best]
@@ -117,7 +164,10 @@ def fetch_variants(card: dict) -> list[dict] | None:
     else:
         typed = [v for v in raw if not any(kw in v.get("printing", "").lower() for kw in FOIL_KEYWORDS)]
 
-    if not typed:
+    printing_filter_fallback = not typed
+    if printing_filter_fallback:
+        log.warning("no %s variants for %s — showing all printings",
+                    "foil" if want_foil else "non-foil", card['id'])
         typed = raw
 
     condition_order = ["near mint", "lightly played", "moderately played", "heavily played", "damaged"]
@@ -134,10 +184,17 @@ def fetch_variants(card: dict) -> list[dict] | None:
     for v in variants:
         log.debug("  %s: market=%s", v['label'], v['market'])
 
-    return variants
+    return {
+        "variants":                 variants,
+        "matched_set_name":         matched_set,
+        "matched_number":           matched_num,
+        "set_number_mismatch":      mismatch,
+        "printing_filter_fallback": printing_filter_fallback,
+    }
 
 
-def get_variants(card: dict) -> list[dict] | None:
+def get_variants(card: dict) -> dict | None:
+    """Cached wrapper around fetch_variants. Returns the result dict or None."""
     if not API_KEY:
         return None
 
@@ -146,16 +203,18 @@ def get_variants(card: dict) -> list[dict] | None:
     now     = time.time()
 
     entry = cache.get(card_id)
-    if entry and now - entry.get("ts", 0) < CACHE_TTL:
+    # Legacy cache entries (pre-mismatch-flag) stored {"variants": [...]};
+    # treat them as expired so they refetch into the new shape.
+    if entry and "result" in entry and now - entry.get("ts", 0) < CACHE_TTL:
         log.debug("cache hit for %s", card_id)
-        return entry.get("variants")
+        return entry["result"]
 
-    variants = fetch_variants(card)
-    if variants is not None:
-        cache[card_id] = {"variants": variants, "ts": now}
+    result = fetch_variants(card)
+    if result is not None:
+        cache[card_id] = {"result": result, "ts": now}
         save_cache(cache)
 
-    return variants
+    return result
 
 
 def tcgplayer_url(card: dict) -> str:
