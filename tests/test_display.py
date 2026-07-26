@@ -1,6 +1,4 @@
-import pytest
-
-from main import CONDITION_ORDER, condition_idx, fmt_price, price_order_violations
+from pricing.display import CONDITION_ORDER, condition_idx, fmt_price, price_order_violations
 
 
 class TestFmtPrice:

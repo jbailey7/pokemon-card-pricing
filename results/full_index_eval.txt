@@ -1,0 +1,5 @@
+Full-index val eval — 2026-07-26 (seed 42, 2,027 augmented queries)
+  val-only gallery (1,998 cards):  top-1 72.3%  top-3 86.3%   <- protocol train.py reports
+  full index      (20,025 cards):  top-1 43.7%  top-3 63.3%   <- the deployed task
+  distractor cost: top-1 +28.6%, top-3 +22.9%
+
